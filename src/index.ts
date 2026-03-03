@@ -4,15 +4,16 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express from "express";
 import { registerAllTools } from "./tools/index.js";
 
-const server = new McpServer({
-  name: "mcp-sumologic",
-  version: "1.0.0",
-  description:
-    "MCP server for searching Sumo Logic logs, detecting issues, generating reports, and querying Kubernetes metrics",
-});
-
-// Register all tools
-registerAllTools(server);
+function createServer(): McpServer {
+  const server = new McpServer({
+    name: "mcp-sumologic",
+    version: "1.0.0",
+    description:
+      "MCP server for searching Sumo Logic logs, detecting issues, generating reports, and querying Kubernetes metrics",
+  });
+  registerAllTools(server);
+  return server;
+}
 
 // Determine transport mode based on environment
 const TRANSPORT = process.env.MCP_TRANSPORT || "stdio";
@@ -30,8 +31,11 @@ if (TRANSPORT === "sse") {
     const transport = new SSEServerTransport("/messages", res);
     transports[transport.sessionId] = transport;
 
+    const server = createServer();
+
     res.on("close", () => {
       delete transports[transport.sessionId];
+      server.close();
     });
 
     await server.connect(transport);
@@ -67,6 +71,7 @@ if (TRANSPORT === "sse") {
   });
 } else {
   // --- Stdio Transport (for local usage with Claude Code / VS Code) ---
+  const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("MCP Sumo Logic server running on stdio");
