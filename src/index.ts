@@ -30,14 +30,28 @@ if (TRANSPORT === "sse") {
   // SSE endpoint — clients connect here to establish a session
   app.get("/sse", async (req, res) => {
     console.log("New SSE connection from:", req.ip);
+
+    // Set headers to prevent ALB/proxy from buffering the SSE stream
+    res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.flushHeaders();
+
     const transport = new SSEServerTransport("/messages", res);
     transports[transport.sessionId] = transport;
 
     const server = createServer();
     servers[transport.sessionId] = server;
 
+    // Keep-alive ping every 15s to prevent ALB from closing idle connection
+    const keepAlive = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(":ping\n\n");
+      }
+    }, 15000);
+
     res.on("close", () => {
       console.log("SSE connection closed:", transport.sessionId);
+      clearInterval(keepAlive);
       delete transports[transport.sessionId];
       delete servers[transport.sessionId];
       server.close();
