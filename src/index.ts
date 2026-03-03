@@ -32,9 +32,9 @@ if (TRANSPORT === "sse") {
     console.log("New SSE connection from:", req.ip);
 
     // Set headers to prevent ALB/proxy from buffering the SSE stream
+    // Note: don't call flushHeaders() — SSEServerTransport does writeHead() internally
     res.setHeader("X-Accel-Buffering", "no");
     res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.flushHeaders();
 
     const transport = new SSEServerTransport("/messages", res);
     transports[transport.sessionId] = transport;
