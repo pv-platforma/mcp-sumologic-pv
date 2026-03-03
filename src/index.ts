@@ -25,29 +25,37 @@ if (TRANSPORT === "sse") {
   app.use(express.json());
 
   const transports: Record<string, SSEServerTransport> = {};
+  const servers: Record<string, McpServer> = {};
 
   // SSE endpoint — clients connect here to establish a session
   app.get("/sse", async (req, res) => {
+    console.log("New SSE connection from:", req.ip);
     const transport = new SSEServerTransport("/messages", res);
     transports[transport.sessionId] = transport;
 
     const server = createServer();
+    servers[transport.sessionId] = server;
 
     res.on("close", () => {
+      console.log("SSE connection closed:", transport.sessionId);
       delete transports[transport.sessionId];
+      delete servers[transport.sessionId];
       server.close();
     });
 
     await server.connect(transport);
+    console.log("SSE session established:", transport.sessionId);
   });
 
   // Messages endpoint — clients send messages here
   app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId as string;
+    console.log("POST /messages for session:", sessionId);
     const transport = transports[sessionId];
     if (transport) {
       await transport.handlePostMessage(req, res);
     } else {
+      console.error("No transport found for session:", sessionId);
       res.status(400).json({ error: "No transport found for sessionId" });
     }
   });
