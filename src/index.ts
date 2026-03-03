@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express from "express";
-import { registerTools } from "./tools/index.js";
+import { registerAllTools } from "./tools/index.js";
 
 const server = new McpServer({
   name: "mcp-sumologic",
@@ -12,7 +12,7 @@ const server = new McpServer({
 });
 
 // Register all tools
-registerTools(server);
+registerAllTools(server);
 
 // Determine transport mode based on environment
 const TRANSPORT = process.env.MCP_TRANSPORT || "stdio";
