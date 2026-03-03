@@ -24,7 +24,10 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
 
 if (TRANSPORT === "sse") {
   const app = express();
-  app.use(express.json());
+
+  // IMPORTANT: Do NOT apply express.json() globally.
+  // StreamableHTTPServerTransport needs to read the raw request stream itself.
+  // Only apply JSON parsing to the legacy SSE /messages endpoint.
 
   // Store transports for both SSE and Streamable HTTP
   const sseTransports: Record<string, SSEServerTransport> = {};
@@ -60,7 +63,7 @@ if (TRANSPORT === "sse") {
     await server.connect(transport);
   });
 
-  app.post("/messages", async (req, res) => {
+  app.post("/messages", express.json(), async (req, res) => {
     const sessionId = req.query.sessionId as string;
     console.log(`[SSE POST] Message for session: ${sessionId}`);
     const transport = sseTransports[sessionId];
