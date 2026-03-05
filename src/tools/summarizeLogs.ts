@@ -11,7 +11,7 @@ import {
 import type { Client } from '../lib/sumologic/types.js';
 
 // ──────────────────────────────────────────────────────────
-// Fallback search: cluster → partition → sourceCategory
+// Comprehensive search: cluster + partition combined, sourceCategory fallback
 // ──────────────────────────────────────────────────────────
 
 async function searchWithFallback(
@@ -23,33 +23,52 @@ async function searchWithFallback(
   queryPart: string,
   options: { from: string; to: string },
 ): Promise<{ result: SearchResult; querySource: string; queryUsed: string }> {
-  // Strategy 1: cluster + namespace + deployment
-  const clusterScope = `cluster="${cluster}" namespace=${namespace} deployment=${deployment} pod=*`;
+  // Build scope: if deployment is provided, filter by it; otherwise get all deployments in namespace
+  const deployFilter = deployment ? ` deployment=${deployment}` : '';
+
+  // Strategy 1: Try BOTH cluster and partition to get complete data
+  // Some deployments may only appear in one or the other
+  const clusterScope = `cluster="${cluster}" namespace=${namespace}${deployFilter} pod=*`;
   const clusterQuery = `${clusterScope} ${queryPart}`;
+
+  let clusterResult: SearchResult | null = null;
+  let partitionResult: SearchResult | null = null;
+
+  // Try cluster
   try {
-    const result = await search(client, clusterQuery, options);
-    if (result.messageCount > 0 || result.recordCount > 0) {
-      return { result, querySource: 'cluster', queryUsed: clusterQuery };
-    }
+    clusterResult = await search(client, clusterQuery, options);
   } catch (e) {
     console.error(`[SummarizeLogs] Cluster query failed: ${(e as Error).message}`);
   }
 
-  // Strategy 2: partition index
+  // Try partition (always try, not just as fallback)
   if (partition) {
-    const partitionScope = `_index=${partition} namespace=${namespace} deployment=${deployment} pod=*`;
+    const partitionScope = `_index=${partition} namespace=${namespace}${deployFilter} pod=*`;
     const partitionQuery = `${partitionScope} ${queryPart}`;
     try {
-      const result = await search(client, partitionQuery, options);
-      if (result.messageCount > 0 || result.recordCount > 0) {
-        return { result, querySource: 'partition', queryUsed: partitionQuery };
-      }
+      partitionResult = await search(client, partitionQuery, options);
     } catch (e) {
       console.error(`[SummarizeLogs] Partition query failed: ${(e as Error).message}`);
     }
   }
 
-  // Strategy 3: sourceCategory
+  // Pick the result with more data (cluster and partition may have different coverage)
+  const clusterCount = (clusterResult?.messageCount || 0) + (clusterResult?.recordCount || 0);
+  const partitionCount = (partitionResult?.messageCount || 0) + (partitionResult?.recordCount || 0);
+
+  if (clusterCount > 0 || partitionCount > 0) {
+    if (partitionCount > clusterCount && partitionResult) {
+      return { result: partitionResult, querySource: 'partition', queryUsed: `_index=${partition} namespace=${namespace}${deployFilter} pod=* ${queryPart}` };
+    }
+    if (clusterResult && clusterCount > 0) {
+      return { result: clusterResult, querySource: 'cluster', queryUsed: clusterQuery };
+    }
+    if (partitionResult && partitionCount > 0) {
+      return { result: partitionResult, querySource: 'partition', queryUsed: `_index=${partition} namespace=${namespace}${deployFilter} pod=* ${queryPart}` };
+    }
+  }
+
+  // Strategy 2: sourceCategory fallback (last resort)
   const sourceCatQuery = `_sourceCategory=*${namespace}* ${queryPart}`;
   try {
     const result = await search(client, sourceCatQuery, options);
@@ -74,29 +93,25 @@ const JSON_LOG_PARSE = [
   '| if(isNull(msg), _raw, msg) as msg',
   '| where !isNull(msg)',
   '| where !(msg contains "/healthcheck")',
+  '| where !(msg contains "kube-probe")',
+  '| where !(msg contains "/healthz")',
+  '| where !(msg contains "Site24x7")',
+  '| where !(msg contains "/api/ui")',
 ].join(' ');
 
 // ──────────────────────────────────────────────────────────
 // Query builders
 // ──────────────────────────────────────────────────────────
 
-/** Lists actual log messages (mirrors your Sumo UI query exactly) */
-function buildListLogsQuery(limit: number): string {
-  return [
-    JSON_LOG_PARSE,
-    '| count by deployment, msg, _messageTime',
-    '| sort _messageTime desc',
-    '| fields - _messageTime, _count',
-    `| limit ${limit}`,
-  ].join(' ');
-}
-
 /** Log level distribution */
 function buildLogLevelDistributionQuery(): string {
   return [
     JSON_LOG_PARSE,
-    '| parse regex field=msg "(?<log_level>(?:ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|FATAL))" nodrop',
-    '| if(isNull(log_level), "UNKNOWN", log_level) as log_level',
+    // Try JSON "level" field first (Hasura, structured logs), then regex from message
+    '| json field=msg "level" as json_level nodrop',
+    '| parse regex field=msg "(?<regex_level>(?:ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|FATAL))" nodrop',
+    '| if(!isNull(json_level), toUpperCase(json_level), regex_level) as log_level',
+    '| if(isNull(log_level) or log_level = "", "UNKNOWN", log_level) as log_level',
     '| count by log_level',
     '| order by _count desc',
   ].join(' ');
@@ -117,8 +132,10 @@ function buildTopErrorsQuery(limit: number): string {
 function buildLogVolumeTimeseriesQuery(timeslice: string): string {
   return [
     JSON_LOG_PARSE,
-    '| parse regex field=msg "(?<log_level>(?:ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|FATAL))" nodrop',
-    '| if(isNull(log_level), "UNKNOWN", log_level) as log_level',
+    '| json field=msg "level" as json_level nodrop',
+    '| parse regex field=msg "(?<regex_level>(?:ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|FATAL))" nodrop',
+    '| if(!isNull(json_level), toUpperCase(json_level), regex_level) as log_level',
+    '| if(isNull(log_level) or log_level = "", "UNKNOWN", log_level) as log_level',
     `| timeslice ${timeslice}`,
     '| count by _timeslice, log_level',
     '| sort _timeslice asc',
@@ -140,7 +157,7 @@ function buildTotalCountQuery(): string {
 export function registerSummarizeLogsTool(server: McpServer): void {
   server.tool(
     'summarize_logs',
-    'Get a comprehensive log summary including actual log listing, log level distribution, top errors, and log volume over time. Supports cluster, partition, and sourceCategory fallback.',
+    'Get a comprehensive log summary including log level distribution, top errors, and log volume over time. Supports cluster, partition, and sourceCategory fallback. Use list_logs tool to list actual log entries.',
     {
       application: z
         .string()
@@ -148,7 +165,7 @@ export function registerSummarizeLogsTool(server: McpServer): void {
       deployment: z
         .string()
         .optional()
-        .describe('Deployment name (e.g., okrs-api). Defaults to <application>-api'),
+        .describe('Deployment name (e.g., okrs-api, okrs-worker). Omit to summarize ALL deployments in the namespace'),
       region: z
         .string()
         .optional()
@@ -164,15 +181,10 @@ export function registerSummarizeLogsTool(server: McpServer): void {
         .default('now')
         .describe('End time'),
       mode: z
-        .enum(['list_logs', 'summary', 'top_errors', 'log_volume', 'all'])
+        .enum(['summary', 'top_errors', 'log_volume', 'all'])
         .optional()
         .default('all')
-        .describe('What to fetch: list_logs (raw messages), summary (level distribution), top_errors, log_volume (timeseries), or all'),
-      logLevel: z
-        .enum(['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE', 'ALL'])
-        .optional()
-        .default('ALL')
-        .describe('Filter by log level (only for list_logs mode)'),
+        .describe('What to fetch: summary (level distribution), top_errors, log_volume (timeseries), or all'),
       timeslice: z
         .string()
         .optional()
@@ -182,10 +194,10 @@ export function registerSummarizeLogsTool(server: McpServer): void {
         .number()
         .optional()
         .default(100)
-        .describe('Max number of log entries / error groups to return'),
+        .describe('Max number of error groups to return'),
     },
-    async ({ application, deployment, region, from, to, mode, logLevel, timeslice, limit }) => {
-      const deploy = deployment || `${application}-api`;
+    async ({ application, deployment, region, from, to, mode, timeslice, limit }) => {
+      const deploy = deployment || '';  // empty = all deployments in namespace
       const ns = application;
       const targetRegions = region
         ? [region]
@@ -207,37 +219,6 @@ export function registerSummarizeLogsTool(server: McpServer): void {
           }
 
           const searchOpts = { from: from || '-24h', to: to || 'now' };
-
-          // ── List Logs (mirrors your exact Sumo UI query) ──
-          if (mode === 'list_logs' || mode === 'all') {
-            try {
-              let queryPart = buildListLogsQuery(limit);
-              // Apply log level filter if specified
-              if (logLevel !== 'ALL') {
-                queryPart = queryPart.replace(
-                  '| count by deployment, msg, _messageTime',
-                  `| where msg matches "*${logLevel}*" | count by deployment, msg, _messageTime`,
-                );
-              }
-
-              const { result, querySource, queryUsed } = await searchWithFallback(
-                client, partition, cluster, ns, deploy, queryPart, searchOpts,
-              );
-
-              const data = result.records?.length ? result.records : result.messages || [];
-              regionData.logs = {
-                entries: data.map((r) => ({
-                  deployment: r.map?.deployment,
-                  message: r.map?.msg?.substring(0, 1000),
-                })),
-                count: data.length,
-                querySource,
-                queryUsed,
-              };
-            } catch (e) {
-              regionData.logs = { error: (e as Error).message };
-            }
-          }
 
           // ── Log Level Distribution ──
           if (mode === 'summary' || mode === 'all') {
@@ -340,9 +321,8 @@ export function registerSummarizeLogsTool(server: McpServer): void {
 
           allResults[reg] = {
             cluster,
-            partition: partition || 'N/A',
             namespace: ns,
-            deployment: deploy,
+            deployment: deploy || 'all',
             ...regionData,
           };
         } catch (error) {
@@ -370,17 +350,12 @@ export function registerSummarizeLogsTool(server: McpServer): void {
             text: JSON.stringify(
               {
                 application: ns,
-                deployment: deploy,
+                deployment: deploy || 'all',
                 timeRange: { from, to },
-                mode,
                 overallSummary: {
                   totalLogs: totalLogsAllRegions,
                   totalErrors: overallErrors,
                   criticalRegions,
-                  regionsAnalyzed: targetRegions.length,
-                  regionsWithData: Object.keys(allResults).filter(
-                    (r) => !allResults[r].error,
-                  ).length,
                 },
                 regionDetails: allResults,
               },

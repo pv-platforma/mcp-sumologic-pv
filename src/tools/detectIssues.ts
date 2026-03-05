@@ -69,7 +69,7 @@ interface IssueAnalysis {
 }
 
 // ──────────────────────────────────────────────────────────
-// Fallback search: cluster → partition → sourceCategory
+// Comprehensive search: cluster + partition combined, sourceCategory fallback
 // ──────────────────────────────────────────────────────────
 
 async function searchWithFallback(
@@ -81,33 +81,51 @@ async function searchWithFallback(
   queryPart: string,
   options: { from: string; to: string },
 ): Promise<{ result: SearchResult; querySource: string; queryUsed: string }> {
-  // Strategy 1: cluster + namespace + deployment
-  const clusterScope = `cluster="${cluster}" namespace=${namespace} deployment=${deployment} pod=*`;
+  // Build scope: if deployment is provided, filter by it; otherwise get all deployments in namespace
+  const deployFilter = deployment ? ` deployment=${deployment}` : '';
+
+  // Strategy 1: Try BOTH cluster and partition to get complete data
+  const clusterScope = `cluster="${cluster}" namespace=${namespace}${deployFilter} pod=*`;
   const clusterQuery = `${clusterScope} ${queryPart}`;
+
+  let clusterResult: SearchResult | null = null;
+  let partitionResult: SearchResult | null = null;
+
+  // Try cluster
   try {
-    const result = await search(client, clusterQuery, options);
-    if (result.messageCount > 0 || result.recordCount > 0) {
-      return { result, querySource: 'cluster', queryUsed: clusterQuery };
-    }
+    clusterResult = await search(client, clusterQuery, options);
   } catch (e) {
     console.error(`[DetectIssues] Cluster query failed: ${(e as Error).message}`);
   }
 
-  // Strategy 2: partition index
+  // Try partition (always try, not just as fallback)
   if (partition) {
-    const partitionScope = `_index=${partition} namespace=${namespace} deployment=${deployment} pod=*`;
+    const partitionScope = `_index=${partition} namespace=${namespace}${deployFilter} pod=*`;
     const partitionQuery = `${partitionScope} ${queryPart}`;
     try {
-      const result = await search(client, partitionQuery, options);
-      if (result.messageCount > 0 || result.recordCount > 0) {
-        return { result, querySource: 'partition', queryUsed: partitionQuery };
-      }
+      partitionResult = await search(client, partitionQuery, options);
     } catch (e) {
       console.error(`[DetectIssues] Partition query failed: ${(e as Error).message}`);
     }
   }
 
-  // Strategy 3: sourceCategory
+  // Pick the result with more data
+  const clusterCount = (clusterResult?.messageCount || 0) + (clusterResult?.recordCount || 0);
+  const partitionCount = (partitionResult?.messageCount || 0) + (partitionResult?.recordCount || 0);
+
+  if (clusterCount > 0 || partitionCount > 0) {
+    if (partitionCount > clusterCount && partitionResult) {
+      return { result: partitionResult, querySource: 'partition', queryUsed: `_index=${partition} namespace=${namespace}${deployFilter} pod=* ${queryPart}` };
+    }
+    if (clusterResult && clusterCount > 0) {
+      return { result: clusterResult, querySource: 'cluster', queryUsed: clusterQuery };
+    }
+    if (partitionResult && partitionCount > 0) {
+      return { result: partitionResult, querySource: 'partition', queryUsed: `_index=${partition} namespace=${namespace}${deployFilter} pod=* ${queryPart}` };
+    }
+  }
+
+  // Strategy 2: sourceCategory fallback (last resort)
   const sourceCatQuery = `_sourceCategory=*${namespace}* ${queryPart}`;
   try {
     const result = await search(client, sourceCatQuery, options);
@@ -132,6 +150,10 @@ const JSON_LOG_PARSE = [
   '| if(isNull(msg), _raw, msg) as msg',
   '| where !isNull(msg)',
   '| where !(msg contains "/healthcheck")',
+  '| where !(msg contains "kube-probe")',
+  '| where !(msg contains "/healthz")',
+  '| where !(msg contains "Site24x7")',
+  '| where !(msg contains "/api/ui")',
 ].join(' ');
 
 const HTTP_LOG_PARSE = [
@@ -139,6 +161,10 @@ const HTTP_LOG_PARSE = [
   '| if(isNull(msg), _raw, msg) as msg',
   '| where !isNull(msg)',
   '| where !(msg contains "/healthcheck")',
+  '| where !(msg contains "kube-probe")',
+  '| where !(msg contains "/healthz")',
+  '| where !(msg contains "Site24x7")',
+  '| where !(msg contains "/api/ui")',
   '| parse regex field=msg "\\"(?<http_method>GET|POST|PUT|DELETE|PATCH) (?<api_endpoint>/api/[^\\s\\"]+) HTTP/\\d+\\.\\d+\\" (?<status_code>\\d+) \\d+ (?<response_time>\\d+\\.\\d+)" nodrop',
 ].join(' ');
 
@@ -619,7 +645,7 @@ export function registerDetectIssuesTool(server: McpServer): void {
       deployment: z
         .string()
         .optional()
-        .describe('Deployment name (e.g., okrs-api). Defaults to <application>-api'),
+        .describe('Deployment name (e.g., okrs-api, okrs-worker). Omit to detect issues across ALL deployments in the namespace'),
       region: z
         .string()
         .optional()
@@ -638,7 +664,7 @@ export function registerDetectIssuesTool(server: McpServer): void {
         .describe('Response time threshold in ms to qualify as slow'),
     },
     async ({ application, deployment, region, from, to, errorThreshold, slowThresholdMs }) => {
-      const deploy = deployment || `${application}-api`;
+      const deploy = deployment || '';  // empty = all deployments in namespace
       const ns = application;
       const targetRegions = region
         ? [region]
