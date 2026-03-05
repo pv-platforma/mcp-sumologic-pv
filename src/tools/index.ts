@@ -8,6 +8,7 @@ import { registerGetPerformanceMetricsTool } from './getPerformanceMetrics.js';
 import { registerGetK8sMetricsTool } from './getK8sMetrics.js';
 import { registerDetectIssuesTool } from './detectIssues.js';
 import { registerGenerateReportTool } from './generateReport.js';
+import { registerGetEndpointMetricsTool } from './getEndpointMetrics.js';
 
 export function registerAllTools(server: McpServer): void {
   registerListRegionsTool(server);
@@ -19,4 +20,5 @@ export function registerAllTools(server: McpServer): void {
   registerGetK8sMetricsTool(server);
   registerDetectIssuesTool(server);
   registerGenerateReportTool(server);
+  registerGetEndpointMetricsTool(server);
 }
