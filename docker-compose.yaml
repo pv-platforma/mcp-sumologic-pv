@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  # ──────────────────────────────────────────
+  # MCP Sumo Logic Server (SSE transport)
+  # ──────────────────────────────────────────
+  mcp-server:
+    container_name: mcp-sumologic
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - MCP_TRANSPORT=sse
+      - PORT=3000
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────
+  # PV Chitti Slack Bot (Socket Mode)
+  # ──────────────────────────────────────────
+  slack-bot:
+    container_name: pv-chitti
+    build:
+      context: .
+      dockerfile: Dockerfile.slack
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    # No ports needed — Socket Mode uses outbound WebSocket
