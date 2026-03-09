@@ -18,11 +18,13 @@ interface ErrorSpike {
   time: string;
   count: number;
   severity: string;
+  deployment?: string;
 }
 
 interface ErrorPattern {
   message: string;
   count: number;
+  deployment?: string;
   firstSeen?: string;
   lastSeen?: string;
 }
@@ -32,10 +34,12 @@ interface FailingEndpoint {
   statusCode: string;
   count: number;
   avgResponseTime?: string;
+  deployment?: string;
 }
 
 interface PodHealth {
   pod: string;
+  deployment?: string;
   errorCount: number;
   totalCount: number;
   errorRate: string;
@@ -178,10 +182,10 @@ function buildErrorSpikesQuery(errorThreshold: number): string {
     JSON_LOG_PARSE,
     '| where msg matches "*ERROR*" or msg matches "*Exception*" or msg matches "*FATAL*" or msg matches "*error*"',
     '| timeslice 5m',
-    '| count by _timeslice',
+    '| count by _timeslice, deployment',
     `| where _count > ${errorThreshold}`,
     '| order by _count desc',
-    '| limit 20',
+    '| limit 30',
   ].join(' ');
 }
 
@@ -193,9 +197,9 @@ function buildErrorPatternsQuery(): string {
     // Extract a meaningful error snippet (first 200 chars of error line)
     '| parse regex field=msg "(?<error_line>(?:ERROR|Exception|FATAL|error)[^\\n]{0,200})" nodrop',
     '| if(isNull(error_line), msg, error_line) as error_line',
-    '| count by error_line',
+    '| count by error_line, deployment',
     '| order by _count desc',
-    '| limit 20',
+    '| limit 30',
   ].join(' ');
 }
 
@@ -207,9 +211,9 @@ function buildFailingEndpointsQuery(): string {
     '| toLong(status_code) as status_code_num',
     '| where status_code_num >= 400',
     '| toDouble(response_time) as response_time',
-    '| count as error_count, avg(response_time) as avg_response_time by api_endpoint, status_code',
+    '| count as error_count, avg(response_time) as avg_response_time by deployment, api_endpoint, status_code',
     '| order by error_count desc',
-    '| limit 20',
+    '| limit 30',
   ].join(' ');
 }
 
@@ -218,10 +222,10 @@ function buildPodHealthQuery(): string {
   return [
     JSON_LOG_PARSE,
     '| if(msg matches "*ERROR*" or msg matches "*Exception*" or msg matches "*FATAL*", 1, 0) as is_error',
-    '| count as total_count, sum(is_error) as error_count by pod',
+    '| count as total_count, sum(is_error) as error_count by deployment, pod',
     '| (100 * error_count / total_count) as error_rate',
     '| order by error_rate desc',
-    '| limit 20',
+    '| limit 30',
   ].join(' ');
 }
 
@@ -232,9 +236,9 @@ function buildSlowEndpointsQuery(slowThresholdMs: number): string {
     '| where !isNull(response_time)',
     '| toDouble(response_time) as response_time_ms',
     `| where response_time_ms > ${slowThresholdMs}`,
-    '| count as slow_count, avg(response_time_ms) as avg_response_time, max(response_time_ms) as max_response_time, pct(response_time_ms, 95) as p95_response_time by api_endpoint',
+    '| count as slow_count, avg(response_time_ms) as avg_response_time, max(response_time_ms) as max_response_time, pct(response_time_ms, 95) as p95_response_time by deployment, api_endpoint',
     '| order by slow_count desc',
-    '| limit 10',
+    '| limit 15',
   ].join(' ');
 }
 
@@ -244,7 +248,7 @@ function buildErrorTimelineQuery(): string {
     JSON_LOG_PARSE,
     '| where msg matches "*ERROR*" or msg matches "*Exception*" or msg matches "*FATAL*"',
     '| timeslice 5m',
-    '| count by _timeslice',
+    '| count by _timeslice, deployment',
     '| order by _timeslice asc',
   ].join(' ');
 }
@@ -254,9 +258,9 @@ function buildRestartDetectionQuery(): string {
   return [
     JSON_LOG_PARSE,
     '| where msg matches "*Starting*" or msg matches "*Listening*" or msg matches "*started*" or msg matches "*initialized*" or msg matches "*Boot*" or msg matches "*restart*"',
-    '| count by pod, _messageTime',
+    '| count by deployment, pod, _messageTime',
     '| sort _messageTime desc',
-    '| limit 20',
+    '| limit 30',
   ].join(' ');
 }
 
@@ -697,6 +701,7 @@ export function registerDetectIssuesTool(server: McpServer): void {
             errorSpikes = extractData(result).map((r) => ({
               time: r._timeslice || '',
               count: parseInt(r._count || '0'),
+              deployment: r.deployment || 'unknown',
               severity: parseInt(r._count || '0') > errorThreshold * 10 ? 'critical' : 
                         parseInt(r._count || '0') > errorThreshold * 5 ? 'high' : 'medium',
             }));
@@ -715,6 +720,7 @@ export function registerDetectIssuesTool(server: McpServer): void {
             topErrorPatterns = extractData(result).map((r) => ({
               message: r.error_line || r.msg || '',
               count: parseInt(r._count || '0'),
+              deployment: r.deployment || 'unknown',
             }));
           } catch (e) {
             console.error(`[DetectIssues] Error patterns query failed: ${(e as Error).message}`);
@@ -732,6 +738,7 @@ export function registerDetectIssuesTool(server: McpServer): void {
               statusCode: r.status_code || '',
               count: parseInt(r.error_count || '0'),
               avgResponseTime: r.avg_response_time || undefined,
+              deployment: r.deployment || 'unknown',
             }));
           } catch (e) {
             console.error(`[DetectIssues] Failing endpoints query failed: ${(e as Error).message}`);
@@ -746,6 +753,7 @@ export function registerDetectIssuesTool(server: McpServer): void {
             );
             podHealth = extractData(result).map((r) => ({
               pod: r.pod || '',
+              deployment: r.deployment || 'unknown',
               errorCount: parseInt(r.error_count || '0'),
               totalCount: parseInt(r.total_count || '0'),
               errorRate: r.error_rate ? `${parseFloat(r.error_rate).toFixed(2)}%` : '0%',
@@ -766,6 +774,7 @@ export function registerDetectIssuesTool(server: McpServer): void {
               statusCode: 'slow',
               count: parseInt(r.slow_count || '0'),
               avgResponseTime: r.avg_response_time || undefined,
+              deployment: r.deployment || 'unknown',
             }));
           } catch (e) {
             console.error(`[DetectIssues] Slow endpoints query failed: ${(e as Error).message}`);
@@ -806,9 +815,19 @@ export function registerDetectIssuesTool(server: McpServer): void {
             severity = 'low';
           }
 
+          // ── Collect unique deployments found ──
+          const deploymentsFound = new Set<string>();
+          errorSpikes.forEach(e => e.deployment && deploymentsFound.add(e.deployment));
+          topErrorPatterns.forEach(e => e.deployment && deploymentsFound.add(e.deployment));
+          failingEndpoints.forEach(e => e.deployment && deploymentsFound.add(e.deployment));
+          podHealth.forEach(e => e.deployment && deploymentsFound.add(e.deployment));
+          slowEndpoints.forEach(e => e.deployment && deploymentsFound.add(e.deployment));
+          deploymentsFound.delete('unknown');
+
           allIssues[reg] = {
             hasIssues,
             severity,
+            deploymentsAffected: Array.from(deploymentsFound),
             errorSpikes,
             topErrorPatterns,
             failingEndpoints,
@@ -817,7 +836,7 @@ export function registerDetectIssuesTool(server: McpServer): void {
             rootCauses,
             recommendations,
             querySource: lastQuerySource,
-          };
+          } as any;
         } catch (error) {
           allIssues[reg] = { error: (error as Error).message };
         }

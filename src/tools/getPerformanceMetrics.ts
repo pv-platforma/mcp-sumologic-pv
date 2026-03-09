@@ -246,6 +246,38 @@ function buildErrorRateQuery(): string {
   ].join(' ');
 }
 
+/** Query 8b: Error rate TREND over time — shows increasing/decreasing pattern */
+function buildErrorRateTimeseriesQuery(timeslice: string): string {
+  return [
+    HTTP_LOG_PARSE,
+    '| where !isNull(status_code)',
+    '| toLong(status_code) as status_code_num',
+    '| if(status_code_num >= 500, 1, 0) as is_server_error',
+    '| if(status_code_num >= 400 and status_code_num < 500, 1, 0) as is_client_error',
+    `| timeslice ${timeslice}`,
+    '| sum(is_server_error) as server_errors,',
+    '  sum(is_client_error) as client_errors,',
+    '  count as total_requests by _timeslice',
+    '| (server_errors / total_requests * 100) as error_rate_pct',
+    '| sort _timeslice asc',
+  ].join(' ');
+}
+
+/** Query 7b: Latency TREND over time — shows P50/P95 increasing/decreasing pattern */
+function buildLatencyTimeseriesQuery(timeslice: string): string {
+  return [
+    HTTP_LOG_PARSE,
+    '| where !isNull(response_time)',
+    '| toDouble(response_time) as response_time_ms',
+    `| timeslice ${timeslice}`,
+    '| avg(response_time_ms) as avg_latency_ms,',
+    '  pct(response_time_ms, 50) as p50_ms,',
+    '  pct(response_time_ms, 95) as p95_ms,',
+    '  count as request_count by _timeslice',
+    '| sort _timeslice asc',
+  ].join(' ');
+}
+
 /** Query 9: Per-user API activity — correlates users with the actions they called using app-level logs */
 function buildUserActivityQuery(): string {
   return [
@@ -265,7 +297,7 @@ function buildUserActivityQuery(): string {
 export function registerGetPerformanceMetricsTool(server: McpServer): void {
   server.tool(
     'get_performance_metrics',
-    'Get application performance metrics: per-endpoint response times (P50/P90/P95), success/failure rates, throughput per second, unique users, per-user API activity, overall API latency (P50/P90/P95/P99), and error rates (5xx/4xx). Counts both HTTP access logs and application-level logs for accurate totals. Use this when asked about application performance, endpoint performance, latency, throughput, error rates, user activity, or how the app is performing.',
+    'Get application performance metrics: per-endpoint response times (P50/P90/P95), success/failure rates, throughput per second, unique users, per-user API activity, overall API latency (P50/P90/P95/P99) with time-series trend, and error rates (5xx/4xx) with time-series trend showing increase/decrease over time. Counts both HTTP access logs and application-level logs for accurate totals. Use this when asked about application performance, endpoint performance, latency, throughput, error rates, error rate trends, user activity, or how the app is performing.',
     {
       application: z.string().describe('Application namespace (e.g., okrs, logbook, roadmaps)'),
       deployment: z.string().optional().describe('Deployment name (e.g., okrs-api). Omit to get metrics from ALL deployments in the namespace'),
@@ -439,7 +471,7 @@ export function registerGetPerformanceMetricsTool(server: McpServer): void {
             }
           }
 
-          // ── Overall Latency ──
+          // ── Overall Latency (aggregated + timeseries trend) ──
           if (metricType === 'latency' || metricType === 'all') {
             try {
               const queryPart = buildLatencyQuery();
@@ -448,21 +480,40 @@ export function registerGetPerformanceMetricsTool(server: McpServer): void {
               );
 
               const data = (result.records?.length ? result.records : result.messages) || [];
+              const latencyResult: Record<string, unknown> = {};
+
               if (data.length > 0) {
-                regionMetrics.latency = {
+                latencyResult.totals = {
                   ...data[0].map,
                   unit: 'ms',
-                  querySource,
                 };
               } else {
-                regionMetrics.latency = { message: 'No latency data found', querySource };
+                latencyResult.totals = { message: 'No latency data found' };
               }
+
+              // Latency trend over time
+              try {
+                const trendQuery = buildLatencyTimeseriesQuery(timeslice);
+                const { result: trendResult } = await searchWithFallback(
+                  logClient, partition, cluster, ns, deploy, trendQuery, searchOpts
+                );
+                const trendData = (trendResult.records?.length ? trendResult.records : trendResult.messages) || [];
+                if (trendData.length > 0) {
+                  latencyResult.trend = trendData.map(r => r.map);
+                  latencyResult.trendBucket = timeslice;
+                }
+              } catch (e) {
+                latencyResult.trend = { error: (e as Error).message };
+              }
+
+              latencyResult.querySource = querySource;
+              regionMetrics.latency = latencyResult;
             } catch (e) {
               regionMetrics.latency = { error: (e as Error).message };
             }
           }
 
-          // ── Error Rate ──
+          // ── Error Rate (aggregated + timeseries trend) ──
           if (metricType === 'error_rate' || metricType === 'all') {
             try {
               const queryPart = buildErrorRateQuery();
@@ -471,20 +522,39 @@ export function registerGetPerformanceMetricsTool(server: McpServer): void {
               );
 
               const data = (result.records?.length ? result.records : result.messages) || [];
+              const errorRateResult: Record<string, unknown> = {};
+
               if (data.length > 0) {
                 const record = data[0].map || {};
-                regionMetrics.errorRate = {
+                errorRateResult.totals = {
                   serverErrors: record.server_errors || '0',
                   clientErrors: record.client_errors || '0',
                   totalRequests: record.total_requests || '0',
                   serverErrorRate: `${record.server_error_rate_pct || '0'}%`,
                   clientErrorRate: `${record.client_error_rate_pct || '0'}%`,
                   totalErrorRate: `${record.total_error_rate_pct || '0'}%`,
-                  querySource,
                 };
               } else {
-                regionMetrics.errorRate = { message: 'No error rate data found', querySource };
+                errorRateResult.totals = { message: 'No error rate data found' };
               }
+
+              // Error rate trend over time
+              try {
+                const trendQuery = buildErrorRateTimeseriesQuery(timeslice);
+                const { result: trendResult } = await searchWithFallback(
+                  logClient, partition, cluster, ns, deploy, trendQuery, searchOpts
+                );
+                const trendData = (trendResult.records?.length ? trendResult.records : trendResult.messages) || [];
+                if (trendData.length > 0) {
+                  errorRateResult.trend = trendData.map(r => r.map);
+                  errorRateResult.trendBucket = timeslice;
+                }
+              } catch (e) {
+                errorRateResult.trend = { error: (e as Error).message };
+              }
+
+              errorRateResult.querySource = querySource;
+              regionMetrics.errorRate = errorRateResult;
             } catch (e) {
               regionMetrics.errorRate = { error: (e as Error).message };
             }
