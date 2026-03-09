@@ -112,7 +112,7 @@ function buildLogLevelDistributionQuery(): string {
     '| parse regex field=msg "(?<regex_level>(?:ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|FATAL))" nodrop',
     '| if(!isNull(json_level), toUpperCase(json_level), regex_level) as log_level',
     '| if(isNull(log_level) or log_level = "", "UNKNOWN", log_level) as log_level',
-    '| count by log_level',
+    '| count by deployment, log_level',
     '| order by _count desc',
   ].join(' ');
 }
@@ -122,7 +122,7 @@ function buildTopErrorsQuery(limit: number): string {
   return [
     JSON_LOG_PARSE,
     '| where msg matches "*ERROR*" or msg matches "*error*" or msg matches "*Exception*" or msg matches "*FATAL*"',
-    '| count by msg',
+    '| count by deployment, msg',
     '| order by _count desc',
     `| limit ${limit}`,
   ].join(' ');
@@ -230,6 +230,7 @@ export function registerSummarizeLogsTool(server: McpServer): void {
 
               const data = result.records?.length ? result.records : result.messages || [];
               const distribution = data.map((r) => ({
+                deployment: r.map?.deployment || 'unknown',
                 level: r.map?.log_level,
                 count: parseInt(r.map?._count || '0'),
               }));
@@ -242,11 +243,15 @@ export function registerSummarizeLogsTool(server: McpServer): void {
                 .filter((d) => d.level === 'WARN' || d.level === 'WARNING')
                 .reduce((acc, d) => acc + d.count, 0);
 
+              // Unique deployments found
+              const deploymentsFound = [...new Set(distribution.map(d => d.deployment).filter(d => d !== 'unknown'))];
+
               regionData.summary = {
                 totalLogs,
                 errorCount,
                 warnCount,
                 errorRate: totalLogs > 0 ? `${((errorCount / totalLogs) * 100).toFixed(2)}%` : '0%',
+                deploymentsFound,
                 distribution,
                 healthStatus:
                   errorCount > 100 ? 'critical' : errorCount > 10 ? 'warning' : 'healthy',
@@ -268,6 +273,7 @@ export function registerSummarizeLogsTool(server: McpServer): void {
               const data = result.records?.length ? result.records : result.messages || [];
               regionData.topErrors = {
                 errors: data.map((r) => ({
+                  deployment: r.map?.deployment || 'unknown',
                   message: r.map?.msg?.substring(0, 500),
                   occurrences: parseInt(r.map?._count || '0'),
                 })),

@@ -28,7 +28,20 @@ async function handleCommand(
   // Unknown
   if (command.type === 'unknown') {
     await say({
-      text: "🤔 I didn't understand that. Try `help` to see what I can do!",
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: "🤔 I didn't quite catch that. Here are some things you can ask me:\n\n" +
+              '  •  `How is okrs performing in APAC?`\n' +
+              '  •  `Show me logbook errors in US`\n' +
+              '  •  `Any issues with roadmaps?`\n' +
+              '  •  `help` for all commands',
+          },
+        },
+      ],
+      text: "I didn't understand that. Try `help`.",
       thread_ts: threadTs,
     });
     return;
@@ -37,18 +50,48 @@ async function handleCommand(
   // Missing namespace
   if (!command.namespace && !command.deployment) {
     await say({
-      text: '❌ Please specify a namespace or deployment.\nExample: `How is okrs-api performing in APAC?`',
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '❌ *Missing application name*\n\n' +
+              'Please specify which application to analyze:\n' +
+              '  •  `How is okrs performing in APAC?`\n' +
+              '  •  `Show logbook errors in EU`\n\n' +
+              '_Available: okrs, logbook, roadmaps, spaces, pvgroups, whiteboards_',
+          },
+        },
+      ],
+      text: 'Please specify an application name.',
       thread_ts: threadTs,
     });
     return;
   }
 
-  // Send loading message
+  // Send loading message with rich formatting
   const target = command.deployment || command.namespace;
   const regionLabel =
-    command.region === 'all' || !command.region ? 'all regions' : command.region;
+    command.region === 'all' || !command.region ? '🌍 all regions' : command.region;
+  const typeLabels: Record<string, string> = {
+    performance: '📊 performance metrics',
+    list_logs: '📋 log entries',
+    summarize_logs: '📈 log summary',
+    detect_issues: '🔍 issue detection',
+    throughput: '🚀 throughput analysis',
+  };
+  const actionLabel = typeLabels[command.type] || command.type.replace('_', ' ');
   await say({
-    text: `🔍 Working on it... Fetching ${command.type.replace('_', ' ')} for \`${target}\` in ${regionLabel} (last ${command.timeRange})`,
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `⏳ *Analyzing ${actionLabel}* for \`${target}\` in ${regionLabel}...\n_Querying Sumo Logic via MCP tools (last ${command.timeRange})_`,
+        },
+      },
+    ],
+    text: `Analyzing ${target}...`,
     thread_ts: threadTs,
   });
 

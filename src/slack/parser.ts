@@ -235,14 +235,27 @@ export function getHelpBlocks(): any[] {
   return [
     {
       type: 'header',
-      text: { type: 'plain_text', text: 'Opvi', emoji: true },
+      text: { type: 'plain_text', text: '🤖 Opvi — Planview Observability Bot', emoji: true },
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: 'Real-time insights from Sumo Logic, powered by Falcon AI + MCP Tools',
+        },
+      ],
     },
     { type: 'divider' },
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: "*Here's what I can help you with:*",
+        text:
+          '*📊 Performance & Metrics*\n' +
+          '`How is okrs performing in APAC?`\n' +
+          '`Show me error rate trends for logbook in US`\n' +
+          '`What is the latency for roadmaps in EU?`',
       },
     },
     {
@@ -250,20 +263,69 @@ export function getHelpBlocks(): any[] {
       text: {
         type: 'mrkdwn',
         text:
-          '📋 *List Logs*\n' +
-          '`list okrs logs in APAC for the last 1 hour`\n' +
-          '`show okrs-api logs in US for the last 30 minutes`\n\n' +
-          '📊 *Performance Reports*\n' +
-          '`How is okrs-api performing in APAC?`\n' +
-          '`Performance of logbook in EU for the last 6 hours`\n\n' +
-          '🌍 *Throughput Comparison*\n' +
-          "`What's the throughput of okrs across all regions?`\n\n" +
-          '🔍 *Detect Issues*\n' +
-          '`Any issues with okrs in APAC?`\n' +
-          '`Show problems in logbook across all regions`\n\n' +
-          '📈 *Log Summary*\n' +
-          '`Summarize okrs logs in US for the last 24 hours`',
+          '*📋 Log Inspection*\n' +
+          '`List okrs errors in APAC for the last 1 hour`\n' +
+          '`Show logbook-odata logs in US last 30 minutes`\n' +
+          '`Show me recent errors for roadmaps`',
       },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          '*🔍 Issue Detection & Root Cause*\n' +
+          '`Any issues with okrs in APAC?`\n' +
+          '`Detect problems in logbook across all regions`\n' +
+          '`What is failing in roadmaps EU?`',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          '*📈 Log Summaries*\n' +
+          '`Summarize okrs logs in US for the last 24 hours`\n' +
+          '`Give me a log overview for logbook in APAC`',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          '*🚀 Throughput & Infra*\n' +
+          '`What is the throughput of okrs across all regions?`\n' +
+          '`Show CPU and memory metrics for okrs in APAC`',
+      },
+    },
+    { type: 'divider' },
+    {
+      type: 'section',
+      fields: [
+        {
+          type: 'mrkdwn',
+          text: '*🌍 Regions*\n`APAC` (aps2-prod)\n`US` (usw2-prod)\n`EU` (euc1-prod)\n`all regions`',
+        },
+        {
+          type: 'mrkdwn',
+          text: '*📦 Applications*\nokrs • logbook • roadmaps\nspaces • pvgroups\nwhiteboards • comments',
+        },
+      ],
+    },
+    {
+      type: 'section',
+      fields: [
+        {
+          type: 'mrkdwn',
+          text: '*⏰ Time Ranges*\n`last 1 hour` • `last 6 hours`\n`last 24 hours` • `last 7 days`',
+        },
+        {
+          type: 'mrkdwn',
+          text: '*🔧 Deployments*\nokrs-api • hasura\nokrs-odata • odata-hasura',
+        },
+      ],
     },
     { type: 'divider' },
     {
@@ -271,7 +333,7 @@ export function getHelpBlocks(): any[] {
       elements: [
         {
           type: 'mrkdwn',
-          text: '💡 *Regions:* APAC (aps2-prod) | US (usw2-prod) | EU (euc1-prod) | all',
+          text: '💡 *Tip:* Just ask naturally! Opvi understands questions like _"How is okrs doing?"_ or _"Any problems in logbook?"_',
         },
       ],
     },

@@ -1,7 +1,7 @@
 import { getAIClient, AIClient } from './aiClient.js';
 import type { ParsedCommand } from './parser.js';
 import type { KnownBlock } from '@slack/web-api';
-import { header, divider, section, context } from './formatters/blocks.js';
+import { header, divider, section, sectionWithFields, context } from './formatters/blocks.js';
 
 /**
  * Orchestrator — connects Slack to Falcon AI (Open WebUI) which calls MCP tools.
@@ -47,12 +47,20 @@ export class Orchestrator {
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[Orchestrator] Error:', message);
+
+      const isTimeout = message.includes('504') || message.includes('timeout') || message.includes('ETIMEDOUT');
+
       return {
         blocks: [
-          header('❌ Error'),
+          header('❌ Request Failed'),
           divider(),
-          section(`Something went wrong: \`${message}\``),
-          context(['💡 Try again or check the logs']),
+          section(
+            isTimeout
+              ? `⏱️ *Gateway Timeout*\nThe query took too long to complete. This usually happens with complex all-region queries.\n\n*Try:*\n  •  Specify a single region: _"okrs performance in APAC"_\n  •  Use a shorter time range: _"last 1 hour"_\n  •  Request specific metrics: _"error rate for okrs in US"_`
+              : `Something went wrong:\n\`\`\`${message.substring(0, 500)}\`\`\``,
+          ),
+          divider(),
+          context(['💡 If the issue persists, check Docker logs or try again']),
         ],
         text: `Error: ${message}`,
       };
@@ -69,9 +77,9 @@ export class Orchestrator {
   ): Promise<{ blocks: KnownBlock[]; text: string }> {
     const regions = ['usw2-prod', 'euc1-prod', 'aps2-prod'];
     const regionLabels: Record<string, string> = {
-      'usw2-prod': '🇺🇸 US West',
-      'euc1-prod': '🇪🇺 EU Central',
-      'aps2-prod': '🇦🇺 AP Southeast',
+      'usw2-prod': 'US',
+      'euc1-prod': 'EU',
+      'aps2-prod': 'AP',
     };
 
     const results: string[] = [];
@@ -163,7 +171,7 @@ export class Orchestrator {
   }
 
   /**
-   * Convert AI text response into Slack Block Kit blocks
+   * Convert AI text response into beautiful Slack Block Kit blocks
    */
   private formatForSlack(
     command: ParsedCommand,
@@ -172,43 +180,64 @@ export class Orchestrator {
     const blocks: KnownBlock[] = [];
     const target = command.deployment || command.namespace || 'unknown';
     const regionLabel =
-      !command.region || command.region === 'all' ? 'All Regions' : command.region;
+      !command.region || command.region === 'all' ? '🌍 All Regions' : this.regionFlag(command.region);
 
-    // Header
-    const typeEmoji: Record<string, string> = {
-      list_logs: '📋',
-      performance: '📊',
-      throughput: '🌍',
-      detect_issues: '🔍',
-      summarize_logs: '📈',
-      help: '❓',
-      unknown: '📌',
+    // Type-specific header with emoji and title
+    const typeConfig: Record<string, { emoji: string; label: string }> = {
+      list_logs:      { emoji: '📋', label: 'Log Entries' },
+      performance:    { emoji: '📊', label: 'Performance Report' },
+      throughput:     { emoji: '🚀', label: 'Throughput Analysis' },
+      detect_issues:  { emoji: '🔍', label: 'Issue Detection' },
+      summarize_logs: { emoji: '📈', label: 'Log Summary' },
+      help:           { emoji: '❓', label: 'Help' },
+      unknown:        { emoji: '🤖', label: 'Analysis' },
     };
 
-    blocks.push(header(`${typeEmoji[command.type] || '📌'} ${target} — ${regionLabel}`));
+    const cfg = typeConfig[command.type] || typeConfig.unknown;
+
+    // ── Top header bar ──
+    blocks.push(header(`${cfg.emoji} ${cfg.label} — ${target}`));
+    blocks.push(
+      context([
+        `${regionLabel}  •  Last \`${command.timeRange}\`  •  ${new Date().toLocaleString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} UTC`,
+      ]),
+    );
     blocks.push(divider());
 
-    // Parse the AI markdown response into Slack blocks
+    // ── Parse the AI markdown response into Slack blocks ──
     const contentBlocks = this.parseMarkdownToBlocks(aiText);
     blocks.push(...contentBlocks);
 
-    // Footer
+    // ── Footer ──
     blocks.push(divider());
     blocks.push(
       context([
-        `🕐 ${new Date().toISOString()} | Last ${command.timeRange} | via Falcon AI + MCP Tools`,
+        `🤖 *Opvi* — powered by Falcon AI + MCP Tools  •  Data from Sumo Logic (real-time)`,
       ]),
     );
 
+    // Slack has a 50-block limit per message
+    const trimmedBlocks = blocks.slice(0, 49);
+
     return {
-      blocks,
-      text: aiText.substring(0, 200) + (aiText.length > 200 ? '...' : ''),
+      blocks: trimmedBlocks,
+      text: aiText.substring(0, 300) + (aiText.length > 300 ? '...' : ''),
     };
   }
 
+  /** Region string → flag label */
+  private regionFlag(region: string): string {
+    const flags: Record<string, string> = {
+      'usw2-prod': '🇺🇸 US West',
+      'euc1-prod': '🇪🇺 EU Central',
+      'aps2-prod': '🇦🇺 AP Southeast',
+    };
+    return flags[region] || region;
+  }
+
   /**
-   * Parse markdown text from AI into Slack blocks.
-   * Handles headers, tables, lists, code blocks.
+   * Parse markdown text from AI into beautiful Slack blocks.
+   * Handles headers, tables, bullet lists, bold/italic, code blocks, numbered lists.
    */
   private parseMarkdownToBlocks(markdown: string): KnownBlock[] {
     const blocks: KnownBlock[] = [];
@@ -216,6 +245,9 @@ export class Orchestrator {
     let currentText = '';
     let inCodeBlock = false;
     let codeContent = '';
+    let inTable = false;
+    let tableRows: string[][] = [];
+    let tableHeader: string[] = [];
 
     const flushText = () => {
       if (currentText.trim()) {
@@ -237,6 +269,43 @@ export class Orchestrator {
       }
     };
 
+    const flushTable = () => {
+      if (tableRows.length === 0) return;
+
+      // For 2-column tables, use Slack fields (side by side)
+      if (tableHeader.length === 2 && tableRows.length <= 5) {
+        const fields = tableRows.map(
+          (row) => `*${row[0] || ''}*\n${row[1] || ''}`,
+        );
+        // Slack allows max 10 fields, 2 per row = 5 visual rows
+        for (let i = 0; i < fields.length; i += 2) {
+          blocks.push(sectionWithFields(fields.slice(i, i + 2)));
+        }
+      } else {
+        // Multi-column: format as aligned text
+        let tableText = '';
+        if (tableHeader.length > 0) {
+          tableText += `*${tableHeader.join('  |  ')}*\n`;
+        }
+        for (const row of tableRows.slice(0, 15)) {
+          tableText += row.join('  |  ') + '\n';
+        }
+        if (tableRows.length > 15) {
+          tableText += `_...and ${tableRows.length - 15} more rows_\n`;
+        }
+        if (tableText.trim()) {
+          const chunks = this.chunkText(tableText.trim(), 2900);
+          for (const chunk of chunks) {
+            blocks.push(section(chunk));
+          }
+        }
+      }
+
+      tableRows = [];
+      tableHeader = [];
+      inTable = false;
+    };
+
     for (const line of lines) {
       // Code block toggle
       if (line.trim().startsWith('```')) {
@@ -245,6 +314,7 @@ export class Orchestrator {
           inCodeBlock = false;
         } else {
           flushText();
+          flushTable();
           inCodeBlock = true;
         }
         continue;
@@ -255,54 +325,88 @@ export class Orchestrator {
         continue;
       }
 
-      // Headers
-      if (line.startsWith('### ')) {
-        flushText();
-        blocks.push(section(`*${line.replace('### ', '').trim()}*`));
-        continue;
-      }
-      if (line.startsWith('## ')) {
-        flushText();
-        blocks.push(divider());
-        blocks.push(section(`*${line.replace('## ', '').trim()}*`));
-        continue;
-      }
-      if (line.startsWith('# ')) {
-        flushText();
-        blocks.push(header(line.replace('# ', '').trim()));
-        continue;
-      }
-
-      // Horizontal rule → divider
-      if (line.trim() === '---' || line.trim() === '***') {
-        flushText();
-        blocks.push(divider());
-        continue;
-      }
-
-      // Table rows → fields or text
+      // ── Table handling ──
       if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
-        if (line.includes('---')) continue; // skip separator
-
         const cells = line
           .split('|')
           .map((c) => c.trim())
           .filter((c) => c);
 
-        if (cells.length === 2) {
-          currentText += `*${cells[0]}:* ${cells[1]}\n`;
-        } else if (cells.length > 2) {
-          currentText += cells.join(' | ') + '\n';
+        // Skip separator rows (|---|---|)
+        if (cells.every((c) => /^[-:]+$/.test(c))) continue;
+
+        if (!inTable) {
+          flushText();
+          inTable = true;
+          tableHeader = cells;
+        } else {
+          tableRows.push(cells);
+        }
+        continue;
+      } else if (inTable) {
+        flushTable();
+      }
+
+      // ── Headers ──
+      if (line.startsWith('#### ')) {
+        flushText();
+        blocks.push(section(`*${line.replace('#### ', '').trim()}*`));
+        continue;
+      }
+      if (line.startsWith('### ')) {
+        flushText();
+        blocks.push(section(`\n*${line.replace('### ', '').trim()}*`));
+        continue;
+      }
+      if (line.startsWith('## ')) {
+        flushText();
+        blocks.push(divider());
+        blocks.push(header(line.replace('## ', '').trim().substring(0, 150)));
+        continue;
+      }
+      if (line.startsWith('# ')) {
+        flushText();
+        blocks.push(header(line.replace('# ', '').trim().substring(0, 150)));
+        continue;
+      }
+
+      // ── Horizontal rule → divider ──
+      if (line.trim() === '---' || line.trim() === '***' || line.trim() === '===') {
+        flushText();
+        blocks.push(divider());
+        continue;
+      }
+
+      // ── Bullet lists — convert to Slack bullet ──
+      if (/^\s*[-*]\s/.test(line)) {
+        const bullet = line.replace(/^\s*[-*]\s/, '').trim();
+        currentText += `  •  ${bullet}\n`;
+        continue;
+      }
+
+      // ── Numbered lists ──
+      if (/^\s*\d+\.\s/.test(line)) {
+        const item = line.replace(/^\s*\d+\.\s/, '').trim();
+        const num = line.match(/^\s*(\d+)\./)?.[1] || '•';
+        currentText += `  ${num}.  ${item}\n`;
+        continue;
+      }
+
+      // ── Empty lines — flush current block to create visual spacing ──
+      if (line.trim() === '') {
+        if (currentText.trim()) {
+          currentText += '\n';
         }
         continue;
       }
 
-      // Regular text
+      // ── Regular text ──
       currentText += line + '\n';
     }
 
     // Flush remaining
     if (inCodeBlock) flushCode();
+    flushTable();
     flushText();
 
     return blocks;

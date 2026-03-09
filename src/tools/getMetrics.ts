@@ -49,11 +49,11 @@ function calculateStats(values: number[]): { avg: number; min: number; max: numb
 export function registerGetMetricsTool(server: McpServer): void {
   server.tool(
     'get_metrics',
-    'Get Kubernetes resource metrics (CPU, memory) for a deployment using Sumo Logic Metrics API. Use this for resource utilization, infra health, container sizing. For latency, throughput, error rates, use get_performance_metrics instead.',
+    'Get Kubernetes resource metrics (CPU, memory) for deployments using Sumo Logic Metrics API. Use this for resource utilization, infra health, container sizing. When no deployment is specified, returns metrics for ALL deployments in the namespace. For latency, throughput, error rates, use get_performance_metrics instead.',
     {
       application: z.string().describe('Application/service name (e.g., okrs, roadmaps, logbook)'),
       namespace: z.string().optional().describe('Kubernetes namespace (defaults to application name)'),
-      deployment: z.string().optional().describe('Deployment name (defaults to {application}-api)'),
+      deployment: z.string().optional().describe('Specific deployment name (e.g., okrs-api, hasura). Omit to get metrics for ALL deployments in the namespace'),
       region: z.string().optional().describe('Specific region or omit for all prod regions'),
       from: z.string().describe('Start time (e.g., -1h, -24h, -7d)'),
       to: z.string().describe('End time (e.g., now)'),
@@ -65,7 +65,6 @@ export function registerGetMetricsTool(server: McpServer): void {
         : getProdRegions().filter(r => getConfiguredRegions().includes(r));
 
       const ns = namespace || application;
-      const deploy = deployment || `${application}-api`;
 
       const startTime = parseTimeString(from);
       const endTime = parseTimeString(to);
@@ -76,13 +75,17 @@ export function registerGetMetricsTool(server: McpServer): void {
         try {
           const metricsClient = getMetricsClient(reg);
           const cluster = getClusterName(reg);
-          const regionMetrics: Record<string, unknown> = {};
+
+          // If deployment specified, query just that one; otherwise query all in namespace
+          const deployFilter = deployment ? `deployment="${deployment}"` : `deployment=*`;
+
+          const regionMetrics: Record<string, Record<string, unknown>> = {};
 
           // ========================================
-          // Memory (in MB)
+          // Memory (in MB) — grouped by deployment
           // ========================================
           if (metricType === 'memory' || metricType === 'all') {
-            const memoryQuery = `cluster="${cluster}" deployment="${deploy}" namespace="${ns}" metric=container_memory_working_set_bytes`;
+            const memoryQuery = `cluster="${cluster}" ${deployFilter} namespace="${ns}" metric=container_memory_working_set_bytes | avg by deployment`;
 
             try {
               const memoryResult = await metricsClient.queryMetrics({
@@ -93,31 +96,38 @@ export function registerGetMetricsTool(server: McpServer): void {
               });
 
               if (memoryResult.response?.[0]?.results?.length > 0) {
-                const datapoints = memoryResult.response[0].results[0].datapoints;
-                const valuesInMB = datapoints.value.map((v: number) => v / (1024 * 1024));
-                const stats = calculateStats(valuesInMB);
+                for (const result of memoryResult.response[0].results) {
+                  const deployName = result.metric?.dimensions?.find(
+                    (d: any) => d.key === 'deployment'
+                  )?.value || 'unknown';
 
-                regionMetrics.memory = {
-                  unit: 'MB',
-                  avg: stats.avg.toFixed(2),
-                  min: stats.min.toFixed(2),
-                  max: stats.max.toFixed(2),
-                  latest: stats.latest.toFixed(2),
-                  dataPoints: datapoints.value.length,
-                };
-              } else {
-                regionMetrics.memory = { message: 'No memory metrics found' };
+                  if (!regionMetrics[deployName]) regionMetrics[deployName] = {};
+
+                  const datapoints = result.datapoints;
+                  const valuesInMB = datapoints.value.map((v: number) => v / (1024 * 1024));
+                  const stats = calculateStats(valuesInMB);
+
+                  regionMetrics[deployName].memory = {
+                    unit: 'MB',
+                    avg: stats.avg.toFixed(2),
+                    min: stats.min.toFixed(2),
+                    max: stats.max.toFixed(2),
+                    latest: stats.latest.toFixed(2),
+                    dataPoints: datapoints.value.length,
+                  };
+                }
               }
             } catch (e) {
-              regionMetrics.memory = { error: (e as Error).message };
+              // If grouped query fails, store error at region level
+              regionMetrics['_error_memory'] = { memory: { error: (e as Error).message } };
             }
           }
 
           // ========================================
-          // CPU (in cores)
+          // CPU (in cores) — grouped by deployment
           // ========================================
           if (metricType === 'cpu' || metricType === 'all') {
-            const cpuQuery = `cluster="${cluster}" namespace="${ns}" deployment="${deploy}" metric=container_cpu_usage_seconds_total | rate`;
+            const cpuQuery = `cluster="${cluster}" namespace="${ns}" ${deployFilter} metric=container_cpu_usage_seconds_total | rate | avg by deployment`;
 
             try {
               const cpuResult = await metricsClient.queryMetrics({
@@ -128,30 +138,43 @@ export function registerGetMetricsTool(server: McpServer): void {
               });
 
               if (cpuResult.response?.[0]?.results?.length > 0) {
-                const datapoints = cpuResult.response[0].results[0].datapoints;
-                const stats = calculateStats(datapoints.value);
+                for (const result of cpuResult.response[0].results) {
+                  const deployName = result.metric?.dimensions?.find(
+                    (d: any) => d.key === 'deployment'
+                  )?.value || 'unknown';
 
-                regionMetrics.cpu = {
-                  unit: 'cores',
-                  avg: stats.avg.toFixed(4),
-                  min: stats.min.toFixed(4),
-                  max: stats.max.toFixed(4),
-                  latest: stats.latest.toFixed(4),
-                  dataPoints: datapoints.value.length,
-                };
-              } else {
-                regionMetrics.cpu = { message: 'No CPU metrics found' };
+                  if (!regionMetrics[deployName]) regionMetrics[deployName] = {};
+
+                  const datapoints = result.datapoints;
+                  const stats = calculateStats(datapoints.value);
+
+                  regionMetrics[deployName].cpu = {
+                    unit: 'cores',
+                    avg: stats.avg.toFixed(4),
+                    min: stats.min.toFixed(4),
+                    max: stats.max.toFixed(4),
+                    latest: stats.latest.toFixed(4),
+                    dataPoints: datapoints.value.length,
+                  };
+                }
               }
             } catch (e) {
-              regionMetrics.cpu = { error: (e as Error).message };
+              regionMetrics['_error_cpu'] = { cpu: { error: (e as Error).message } };
             }
+          }
+
+          // Clean up error-only keys
+          const cleanMetrics: Record<string, unknown> = {};
+          for (const [key, val] of Object.entries(regionMetrics)) {
+            if (!key.startsWith('_error_')) cleanMetrics[key] = val;
+            else Object.assign(cleanMetrics, val);
           }
 
           metrics[reg] = {
             cluster,
             namespace: ns,
-            deployment: deploy,
-            ...regionMetrics,
+            deploymentsFound: Object.keys(cleanMetrics).filter(k => !k.startsWith('_')),
+            deployments: cleanMetrics,
           };
         } catch (error) {
           metrics[reg] = { error: (error as Error).message };
@@ -166,7 +189,7 @@ export function registerGetMetricsTool(server: McpServer): void {
           text: JSON.stringify({
             application,
             namespace: ns,
-            deployment: deploy,
+            deployment: deployment || 'all (auto-discovered)',
             timeRange: { from, to },
             metricType,
             summary,
@@ -189,28 +212,34 @@ function generateMetricsSummary(metrics: Record<string, unknown>): Record<string
 
   for (const [region, data] of Object.entries(metrics)) {
     const regionData = data as Record<string, unknown>;
+    if (regionData.error) continue;
 
-    const memory = regionData.memory as Record<string, unknown> | undefined;
-    if (memory && !memory.error && !memory.message) {
-      const avgMemory = parseFloat(String(memory.avg || memory.latest || 0));
-      if (avgMemory > 4000) {
-        alerts.push(`🔴 Critical memory in ${region}: ${avgMemory.toFixed(0)} MB`);
-        summary.healthStatus = '🔴 critical';
-      } else if (avgMemory > 2000) {
-        alerts.push(`⚠️ High memory in ${region}: ${avgMemory.toFixed(0)} MB`);
-        if (summary.healthStatus !== '🔴 critical') summary.healthStatus = '🟡 warning';
+    const deployments = regionData.deployments as Record<string, Record<string, unknown>> | undefined;
+    if (!deployments) continue;
+
+    for (const [deployName, deployData] of Object.entries(deployments)) {
+      const memory = deployData.memory as Record<string, unknown> | undefined;
+      if (memory && !memory.error && !memory.message) {
+        const avgMemory = parseFloat(String(memory.avg || memory.latest || 0));
+        if (avgMemory > 4000) {
+          alerts.push(`🔴 Critical memory in ${region}/${deployName}: ${avgMemory.toFixed(0)} MB`);
+          summary.healthStatus = '🔴 critical';
+        } else if (avgMemory > 2000) {
+          alerts.push(`⚠️ High memory in ${region}/${deployName}: ${avgMemory.toFixed(0)} MB`);
+          if (summary.healthStatus !== '🔴 critical') summary.healthStatus = '🟡 warning';
+        }
       }
-    }
 
-    const cpu = regionData.cpu as Record<string, unknown> | undefined;
-    if (cpu && !cpu.error && !cpu.message) {
-      const avgCpu = parseFloat(String(cpu.avg || cpu.latest || 0));
-      if (avgCpu > 0.9) {
-        alerts.push(`🔴 Critical CPU in ${region}: ${(avgCpu * 100).toFixed(1)}%`);
-        summary.healthStatus = '🔴 critical';
-      } else if (avgCpu > 0.7) {
-        alerts.push(`⚠️ High CPU in ${region}: ${(avgCpu * 100).toFixed(1)}%`);
-        if (summary.healthStatus !== '🔴 critical') summary.healthStatus = '🟡 warning';
+      const cpu = deployData.cpu as Record<string, unknown> | undefined;
+      if (cpu && !cpu.error && !cpu.message) {
+        const avgCpu = parseFloat(String(cpu.avg || cpu.latest || 0));
+        if (avgCpu > 0.9) {
+          alerts.push(`🔴 Critical CPU in ${region}/${deployName}: ${(avgCpu * 100).toFixed(1)}%`);
+          summary.healthStatus = '🔴 critical';
+        } else if (avgCpu > 0.7) {
+          alerts.push(`⚠️ High CPU in ${region}/${deployName}: ${(avgCpu * 100).toFixed(1)}%`);
+          if (summary.healthStatus !== '🔴 critical') summary.healthStatus = '🟡 warning';
+        }
       }
     }
   }
