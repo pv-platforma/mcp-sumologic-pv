@@ -235,14 +235,14 @@ export function getHelpBlocks(): any[] {
   return [
     {
       type: 'header',
-      text: { type: 'plain_text', text: '🤖 Opvi — Planview Observability Bot', emoji: true },
+      text: { type: 'plain_text', text: 'Opvi — Planview Observability Bot', emoji: true },
     },
     {
       type: 'context',
       elements: [
         {
           type: 'mrkdwn',
-          text: 'Real-time insights from Sumo Logic, powered by Falcon AI + MCP Tools',
+          text: 'Real-time insights from real time data, powered by Falcon AI + MCP Tools',
         },
       ],
     },

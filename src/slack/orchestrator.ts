@@ -212,7 +212,7 @@ export class Orchestrator {
     blocks.push(divider());
     blocks.push(
       context([
-        `🤖 *Opvi* — powered by Falcon AI + MCP Tools  •  Data from Sumo Logic (real-time)`,
+        ` *Opvi* — powered by Falcon AI + MCP Tools `,
       ]),
     );
 

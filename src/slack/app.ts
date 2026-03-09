@@ -87,7 +87,7 @@ async function handleCommand(
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `⏳ *Analyzing ${actionLabel}* for \`${target}\` in ${regionLabel}...\n_Querying Sumo Logic via MCP tools (last ${command.timeRange})_`,
+          text: `⏳ *Analyzing ${actionLabel}* for \`${target}\` in ${regionLabel}...\n_Getting the results via MCP tools (last ${command.timeRange})_`,
         },
       },
     ],
