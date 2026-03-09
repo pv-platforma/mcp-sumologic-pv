@@ -1,0 +1,245 @@
+/**
+ * Parses natural language Slack messages into structured commands
+ * for the MCP tools.
+ */
+
+export type CommandType =
+  | 'list_logs'
+  | 'performance'
+  | 'throughput'
+  | 'detect_issues'
+  | 'summarize_logs'
+  | 'help'
+  | 'unknown';
+
+export interface ParsedCommand {
+  type: CommandType;
+  namespace?: string;
+  deployment?: string;
+  region?: string;
+  timeRange?: string;
+  timeRangeMs?: number;
+}
+
+const REGION_ALIASES: Record<string, string> = {
+  apac: 'aps2-prod',
+  ap: 'aps2-prod',
+  asia: 'aps2-prod',
+  australia: 'aps2-prod',
+  aps2: 'aps2-prod',
+  'aps2-prod': 'aps2-prod',
+  us: 'usw2-prod',
+  usa: 'usw2-prod',
+  'us west': 'usw2-prod',
+  usw2: 'usw2-prod',
+  'usw2-prod': 'usw2-prod',
+  eu: 'euc1-prod',
+  europe: 'euc1-prod',
+  euc1: 'euc1-prod',
+  'euc1-prod': 'euc1-prod',
+  all: 'all',
+  'all regions': 'all',
+};
+
+const KNOWN_NAMESPACES = [
+  'okrs',
+  'logbook',
+  'roadmaps',
+  'spaces',
+  'pvgroups',
+  'whiteboards',
+  'planviewme',
+  'comments',
+];
+
+const KNOWN_DEPLOYMENT_SUFFIXES = [
+  'api',
+  'odata',
+  'hasura',
+  'odata-hasura',
+];
+
+export function parseCommand(text: string): ParsedCommand {
+  const lower = text.toLowerCase().trim();
+
+  // Help
+  if (
+    lower === 'help' ||
+    lower.includes('what can you do') ||
+    lower.includes('how to use')
+  ) {
+    return { type: 'help' };
+  }
+
+  // Detect command type
+  let type: CommandType = 'unknown';
+
+  if (
+    lower.includes('throughput') &&
+    (lower.includes('all region') || lower.includes('across') || lower.includes('every region'))
+  ) {
+    type = 'throughput';
+  } else if (
+    lower.includes('perform') ||
+    lower.includes('how is') ||
+    lower.includes("how's") ||
+    lower.includes('health') ||
+    lower.includes('status') ||
+    lower.includes('metrics')
+  ) {
+    type = 'performance';
+  } else if (
+    lower.includes('list log') ||
+    lower.includes('show log') ||
+    lower.includes('get log') ||
+    lower.includes('tail log') ||
+    lower.includes('recent log')
+  ) {
+    type = 'list_logs';
+  } else if (
+    lower.includes('issue') ||
+    lower.includes('problem') ||
+    lower.includes('error') ||
+    lower.includes('anomal')
+  ) {
+    type = 'detect_issues';
+  } else if (
+    lower.includes('summar') ||
+    lower.includes('overview') ||
+    lower.includes('top error')
+  ) {
+    type = 'summarize_logs';
+  } else if (lower.includes('log')) {
+    type = 'list_logs';
+  }
+
+  // Extract namespace
+  let namespace: string | undefined;
+  for (const ns of KNOWN_NAMESPACES) {
+    if (lower.includes(ns)) {
+      namespace = ns;
+      break;
+    }
+  }
+
+  // Extract deployment (e.g. okrs-api, okrs-odata, dovetail-standalone)
+  let deployment: string | undefined;
+  const deploymentRegex = new RegExp(
+    `(\\w+-(?:${KNOWN_DEPLOYMENT_SUFFIXES.join('|')}))`,
+    'i'
+  );
+  const deploymentMatch = lower.match(deploymentRegex);
+  if (deploymentMatch) {
+    deployment = deploymentMatch[1];
+  } else if (lower.includes('hasura')) {
+    deployment = 'hasura';
+  } else if (lower.includes('dovetail')) {
+    deployment = 'dovetail-standalone';
+  }
+
+  // Extract region
+  let region: string | undefined;
+  for (const [alias, regionId] of Object.entries(REGION_ALIASES)) {
+    if (lower.includes(alias)) {
+      region = regionId;
+      break;
+    }
+  }
+
+  // Extract time range
+  let timeRange: string | undefined;
+  let timeRangeMs: number | undefined;
+
+  const minuteMatch = lower.match(/last\s+(\d+)\s*min(ute)?s?/i);
+  const hourMatch = lower.match(/last\s+(\d+)\s*h(ou)?rs?/i);
+  const dayMatch = lower.match(/last\s+(\d+)\s*d(ay)?s?/i);
+
+  if (minuteMatch) {
+    const mins = parseInt(minuteMatch[1], 10);
+    timeRangeMs = mins * 60 * 1000;
+    timeRange = `-${mins}m`;
+  } else if (hourMatch) {
+    const hours = parseInt(hourMatch[1], 10);
+    timeRangeMs = hours * 60 * 60 * 1000;
+    timeRange = `-${hours}h`;
+  } else if (dayMatch) {
+    const days = parseInt(dayMatch[1], 10);
+    timeRangeMs = days * 24 * 60 * 60 * 1000;
+    timeRange = `-${days}d`;
+  }
+
+  // Default time range
+  if (!timeRange) {
+    if (type === 'list_logs') {
+      timeRangeMs = 60 * 60 * 1000;
+      timeRange = '-1h';
+    } else {
+      timeRangeMs = 24 * 60 * 60 * 1000;
+      timeRange = '-24h';
+    }
+  }
+
+  // If we have a deployment but no namespace, infer it
+  if (deployment && !namespace) {
+    const parts = deployment.split('-');
+    if (parts.length > 1 && KNOWN_NAMESPACES.includes(parts[0])) {
+      namespace = parts[0];
+    }
+  }
+
+  return {
+    type: type === 'unknown' && namespace ? 'performance' : type,
+    namespace,
+    deployment,
+    region,
+    timeRange,
+    timeRangeMs,
+  };
+}
+
+export function getHelpBlocks(): any[] {
+  return [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: 'PV Chitti', emoji: true },
+    },
+    { type: 'divider' },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: "*Here's what I can help you with:*",
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          '📋 *List Logs*\n' +
+          '`list okrs logs in APAC for the last 1 hour`\n' +
+          '`show okrs-api logs in US for the last 30 minutes`\n\n' +
+          '📊 *Performance Reports*\n' +
+          '`How is okrs-api performing in APAC?`\n' +
+          '`Performance of logbook in EU for the last 6 hours`\n\n' +
+          '🌍 *Throughput Comparison*\n' +
+          "`What's the throughput of okrs across all regions?`\n\n" +
+          '🔍 *Detect Issues*\n' +
+          '`Any issues with okrs in APAC?`\n' +
+          '`Show problems in logbook across all regions`\n\n' +
+          '📈 *Log Summary*\n' +
+          '`Summarize okrs logs in US for the last 24 hours`',
+      },
+    },
+    { type: 'divider' },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: '💡 *Regions:* APAC (aps2-prod) | US (usw2-prod) | EU (euc1-prod) | all',
+        },
+      ],
+    },
+  ];
+}

@@ -1,4 +1,4 @@
-.PHONY: install build start clean lint test
+.PHONY: install build start clean lint test slack slack-dev
 
 install:
 	npm install
@@ -11,6 +11,12 @@ start:
 
 dev:
 	npm run dev
+
+slack:
+	npm run slack
+
+slack-dev:
+	npm run slack:dev
 
 clean:
 	rm -rf dist

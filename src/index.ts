@@ -144,6 +144,39 @@ if (TRANSPORT === "sse") {
     console.log(`  Streamable HTTP endpoint:  http://0.0.0.0:${PORT}/mcp`);
     console.log(`  Health check:              http://0.0.0.0:${PORT}/health`);
   });
+
+  // ============================================
+  // Start Slack Bot alongside MCP server (if configured)
+  // The Slack bot uses Socket Mode (outbound WebSocket) — no extra port needed.
+  // It coexists with the MCP HTTP server in the same process.
+  // ============================================
+  if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
+    import('./slack/index.js').then(async ({ startSlackBot }) => {
+      try {
+        // Discover MCP tools before starting the bot
+        const { getAIClient } = await import('./slack/aiClient.js');
+        const aiClient = getAIClient();
+        const aiHealthy = await aiClient.healthCheck();
+        if (aiHealthy) {
+          console.log(`✅ Falcon AI (${process.env.OPENWEBUI_URL}) is reachable`);
+          try {
+            const toolIds = await aiClient.discoverMcpTools();
+            console.log(`✅ MCP Tools discovered: ${toolIds.length} tool(s)`);
+            toolIds.forEach((id) => console.log(`   🔧 ${id}`));
+          } catch {
+            console.log('   ⚠️ Could not discover MCP tools');
+          }
+        }
+
+        await startSlackBot();
+      } catch (error) {
+        console.error('❌ Slack bot failed to start:', error);
+        // Don't crash the MCP server if Slack bot fails
+      }
+    });
+  } else {
+    console.log('ℹ️  Slack bot not started (SLACK_BOT_TOKEN / SLACK_APP_TOKEN not set)');
+  }
 } else {
   const server = createServer();
   const transport = new StdioServerTransport();

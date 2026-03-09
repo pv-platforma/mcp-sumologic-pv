@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.env.example
+*.md
+.DS_Store
+test-api.sh
+jest.config.*
+.eslintrc.*
+.prettierrc.*
+Dockerfile.slack
+docker-compose.yml
