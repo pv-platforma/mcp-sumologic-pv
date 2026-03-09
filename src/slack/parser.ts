@@ -235,7 +235,7 @@ export function getHelpBlocks(): any[] {
   return [
     {
       type: 'header',
-      text: { type: 'plain_text', text: 'PV Chitti', emoji: true },
+      text: { type: 'plain_text', text: 'Opvi', emoji: true },
     },
     { type: 'divider' },
     {

@@ -155,7 +155,7 @@ export async function startSlackBot(): Promise<void> {
 
   const port = parseInt(process.env.SLACK_PORT || '3001', 10);
   await app.start(port);
-  console.log(`⚡️ PV Chitti is running`);
+  console.log(`⚡️ Opvi is running`);
   console.log(`   🔗 Open WebUI: ${process.env.OPENWEBUI_URL || 'not configured'}`);
   console.log(`   🤖 Model: ${process.env.OPENWEBUI_MODEL || 'not configured'}`);
   console.log(`   📋 Listening for: @mentions, DMs, /platforma`);

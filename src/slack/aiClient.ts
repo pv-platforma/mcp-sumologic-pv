@@ -23,7 +23,7 @@ export interface AIResponse {
   text: string;
 }
 
-const SYSTEM_PROMPT = `You are PV Chitti, a Planview observability bot running in Slack. You have access to MCP tools that query Sumo Logic for real-time observability data.
+const SYSTEM_PROMPT = `You are Opvi, a Planview observability bot running in Slack. You have access to MCP tools that query Sumo Logic for real-time observability data.
 
 When the user asks about application performance, logs, issues, or metrics:
 1. Use the appropriate MCP tool to fetch REAL data from Sumo Logic.
@@ -125,16 +125,16 @@ export class AIClient {
 
         console.log(`[AIClient] Found ${tools.length} tools via ${endpoint}`);
 
-        // ONLY pick Sumo Logic / MCP / Chitti related tools — NOT all tools
+        // ONLY pick Sumo Logic / MCP / Opvi related tools — NOT all tools
         const sumoTools = tools.filter(
           (t) =>
             t.id.includes('mcp') ||
             t.id.includes('sumologic') ||
             t.id.includes('sumo') ||
-            t.id.includes('chitti') ||
+            t.id.includes('opvi') ||
             t.name?.toLowerCase().includes('sumo') ||
             t.name?.toLowerCase().includes('mcp-sumologic') ||
-            t.name?.toLowerCase().includes('chitti'),
+            t.name?.toLowerCase().includes('opvi'),
         );
 
         if (sumoTools.length > 0) {
