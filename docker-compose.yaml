@@ -20,10 +20,10 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────
-  # PV Chitti Slack Bot (Socket Mode)
+  # Opvi Slack Bot (Socket Mode)
   # ──────────────────────────────────────────
   slack-bot:
-    container_name: pv-chitti
+    container_name: opvi
     build:
       context: .
       dockerfile: Dockerfile.slack
