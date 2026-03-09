@@ -52,6 +52,25 @@ const KNOWN_NAMESPACES = [
   'comments',
 ];
 
+// Aliases: common variations → canonical namespace
+const NAMESPACE_ALIASES: Record<string, string> = {
+  okr: 'okrs',
+  'okr-api': 'okrs',
+  'okrs-api': 'okrs',
+  roadmap: 'roadmaps',
+  'road map': 'roadmaps',
+  'road maps': 'roadmaps',
+  space: 'spaces',
+  whiteboard: 'whiteboards',
+  comment: 'comments',
+  logbooks: 'logbook',
+  'log book': 'logbook',
+  'log books': 'logbook',
+  pvgroup: 'pvgroups',
+  'pv group': 'pvgroups',
+  'pv groups': 'pvgroups',
+};
+
 const KNOWN_DEPLOYMENT_SUFFIXES = [
   'api',
   'odata',
@@ -113,12 +132,27 @@ export function parseCommand(text: string): ParsedCommand {
     type = 'list_logs';
   }
 
-  // Extract namespace
+  // Extract namespace — check aliases first (longest match wins), then exact names
   let namespace: string | undefined;
-  for (const ns of KNOWN_NAMESPACES) {
-    if (lower.includes(ns)) {
-      namespace = ns;
+
+  // Sort aliases by length descending so "okrs-api" matches before "okr"
+  const sortedAliases = Object.entries(NAMESPACE_ALIASES).sort(
+    (a, b) => b[0].length - a[0].length
+  );
+  for (const [alias, canonical] of sortedAliases) {
+    if (lower.includes(alias)) {
+      namespace = canonical;
       break;
+    }
+  }
+
+  // If no alias matched, try exact namespace names
+  if (!namespace) {
+    for (const ns of KNOWN_NAMESPACES) {
+      if (lower.includes(ns)) {
+        namespace = ns;
+        break;
+      }
     }
   }
 

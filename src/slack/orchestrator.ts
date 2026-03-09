@@ -16,13 +16,6 @@ import { header, divider, section, context } from './formatters/blocks.js';
  *                                  LLM formats response
  *                                       ↓
  *                                  Slack Block Kit message
- *
- * Key fix: We pass `tool_ids` in the API request so Open WebUI activates
- * MCP tools on the server side (same behavior as the web UI).
- *
- * To avoid 504 gateway timeouts (60s nginx limit on Falcon AI):
- * - Single-region queries are sent directly (~34-47s, within limit)
- * - All-region queries are split into parallel per-region queries
  */
 
 export class Orchestrator {
