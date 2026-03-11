@@ -35,6 +35,8 @@ CRITICAL RULES:
 - If a tool returns no data or an error, report that honestly.
 - Never invent metrics, endpoints, user IDs, or counts.
 - Every number in your response MUST come from actual tool results.
+- Each query is INDEPENDENT — do not reference or reuse data from previous queries unless conversation history is provided.
+- When conversation history is provided, use it for CONTEXT only — still fetch fresh data via tools.
 
 Available MCP tools and when to use them:
 - get_performance_metrics: For performance, latency, throughput, error rates, error rate trends, latency trends, user activity
@@ -184,15 +186,44 @@ export class AIClient {
    *
    * IMPORTANT: Each query should target a SINGLE region to stay within the 60s
    * gateway timeout. The orchestrator handles multi-region by splitting queries.
+   *
+   * Uses a fresh chat_id per query by default to avoid session carryover.
+   * When conversation history is provided (thread follow-ups), includes previous
+   * messages so the LLM has context — but still uses tools for fresh data.
    */
-  async query(userMessage: string): Promise<AIResponse> {
+  async query(userMessage: string, options?: {
+    chatId?: string;
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+    isFollowUp?: boolean;
+  }): Promise<AIResponse> {
     const url = `${this.config.baseUrl}/api/chat/completions`;
 
     // Discover MCP tools first
     const toolIds = await this.discoverMcpTools();
 
-    console.log(`[AIClient] Sending to Open WebUI with ${toolIds.length} tool(s): "${userMessage.substring(0, 100)}..."`);
+    // Fresh chat_id per query unless a thread chat_id is provided
+    const chatId = options?.chatId || `opvi-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const history = options?.history || [];
+    const isFollowUp = options?.isFollowUp || false;
+
+    console.log(`[AIClient] Sending to Open WebUI (chat_id: ${chatId}, follow_up: ${isFollowUp}, history: ${history.length} msgs, tools: ${toolIds.length})`);
+    console.log(`[AIClient] Prompt: "${userMessage.substring(0, 100)}..."`);
     const startTime = Date.now();
+
+    // Build messages array: system + optional history + current user message
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'system', content: SYSTEM_PROMPT },
+    ];
+
+    // Include conversation history for thread follow-ups
+    if (isFollowUp && history.length > 0) {
+      console.log(`[AIClient] Including ${history.length} messages of thread history`);
+      for (const msg of history) {
+        messages.push({ role: msg.role, content: msg.content });
+      }
+    }
+
+    messages.push({ role: 'user', content: userMessage });
 
     const response = await fetch(url, {
       method: 'POST',
@@ -202,10 +233,8 @@ export class AIClient {
       },
       body: JSON.stringify({
         model: this.config.model,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userMessage },
-        ],
+        messages,
+        chat_id: chatId,
         // Pass tool_ids so Open WebUI activates MCP tools server-side
         ...(toolIds.length > 0 && { tool_ids: toolIds }),
         max_tokens: this.config.maxTokens || 4096,
