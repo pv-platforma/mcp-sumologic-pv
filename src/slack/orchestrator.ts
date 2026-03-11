@@ -156,7 +156,8 @@ export class Orchestrator {
             region,
             type: sub.metricType as ParsedCommand['type'],
           };
-          const enrichedPrompt = this.enrichQuery(subCommand, originalText);
+          const isSubQuery = subQueries.length > 1;
+          const enrichedPrompt = this.enrichQuery(subCommand, originalText, isSubQuery);
 
           console.log(`[Orchestrator] ${flag} → ${sub.label}...`);
 
@@ -173,7 +174,6 @@ export class Orchestrator {
 
           try {
             const response = await this.aiClient.query(enrichedPrompt, {
-              chatId: conversation.chatId,
               history: conversation.history,
               isFollowUp: conversation.isFollowUp,
             });
@@ -181,11 +181,6 @@ export class Orchestrator {
             if (response.text) {
               successCount++;
               allText += `\n\n## ${flag} — ${sub.label}\n\n${response.text}`;
-
-              // Store assistant response in thread history
-              if (threadTs) {
-                conversationManager.addAssistantMessage(threadTs, response.text);
-              }
 
               // ── Stream this result to Slack immediately ──
               if (say) {
@@ -226,8 +221,6 @@ export class Orchestrator {
 
       // ── Post footer ──
       const summaryParts: string[] = [];
-      if (successCount > 0) summaryParts.push(`✅ ${successCount} query(s) succeeded`);
-      if (errorCount > 0) summaryParts.push(`⚠️ ${errorCount} query(s) failed`);
 
       if (say) {
         await say({
@@ -240,6 +233,15 @@ export class Orchestrator {
           text: summaryParts.join(' | '),
           thread_ts: threadTs,
         });
+      }
+
+      // ── Store a brief summary in conversation history (NOT all the raw data) ──
+      // This keeps thread context lightweight for follow-up questions
+      if (threadTs && allText) {
+        const briefSummary = `Ran ${command.type} for ${target} in ${regions.map(r => this.regionFlag(r)).join(', ')}. ` +
+          `${successCount} succeeded, ${errorCount} failed. ` +
+          `Metrics queried: ${subQueries.map(s => s.label).join(', ')}.`;
+        conversationManager.addAssistantMessage(threadTs, briefSummary);
       }
 
       // Return combined text (fallback for non-streaming)
@@ -287,10 +289,27 @@ export class Orchestrator {
   /**
    * Enrich the user query with explicit context so the LLM
    * knows exactly which MCP tool parameters to use.
+   *
+   * @param isSubQuery — true when this is one part of a "performance" breakdown.
+   *   Sub-queries get a terse prompt: "just the data, no summary/recommendations".
+   *   Standalone queries get the full treatment.
    */
-  private enrichQuery(command: ParsedCommand, originalText: string): string {
-    const parts: string[] = [originalText];
+  private enrichQuery(command: ParsedCommand, originalText: string, isSubQuery: boolean = false): string {
+    const parts: string[] = [];
     const hints: string[] = [];
+
+    // For sub-queries: replace the original prompt with a focused one
+    if (isSubQuery) {
+      const target = command.deployment || command.namespace || 'unknown';
+      parts.push(`Show ${command.type.replace('_', ' ')} for ${target} in ${command.region}.`);
+      hints.push(
+        'OUTPUT FORMAT: Be concise. Show ONLY the data in a table or bullet points. ' +
+        'Do NOT include Overall Health, Recommendations, Summary, or Details sections. ' +
+        'Do NOT include introductory text. Just the metric data.'
+      );
+    } else {
+      parts.push(originalText);
+    }
 
     // ALWAYS include region — this is critical to avoid all-region queries
     // that exceed the 60s gateway timeout
