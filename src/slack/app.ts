@@ -146,7 +146,7 @@ IMPORTANT: Use MCP tools to fetch fresh data if needed. Reference conversation h
   const typeLabels: Record<string, string> = {
     performance: '📊 performance report',
     throughput: '🚀 traffic & throughput',
-    unique_users: '👥 active users',
+    unique_users: '👥 unique users',
     success_failure_totals: '✅ success & failure rates',
     endpoint_performance: '� endpoint performance',
     latency: '⏱️ response times',
