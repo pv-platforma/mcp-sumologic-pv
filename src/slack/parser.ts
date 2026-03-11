@@ -6,6 +6,8 @@
 export type CommandType =
   | 'list_logs'
   | 'performance'
+  | 'error_rate'
+  | 'latency'
   | 'throughput'
   | 'detect_issues'
   | 'summarize_logs'
@@ -91,11 +93,34 @@ export function parseCommand(text: string): ParsedCommand {
   }
 
   // Detect command type
+  // Order matters: specific sub-types first, then generic patterns
   let type: CommandType = 'unknown';
 
+  // ── Specific performance sub-types (match before generic "performance") ──
   if (
-    lower.includes('throughput') &&
-    (lower.includes('all region') || lower.includes('across') || lower.includes('every region'))
+    lower.includes('error rate') ||
+    lower.includes('error rates') ||
+    lower.includes('error trend') ||
+    lower.includes('5xx') ||
+    lower.includes('4xx') ||
+    lower.includes('server error')
+  ) {
+    type = 'error_rate';
+  } else if (
+    lower.includes('latency') ||
+    lower.includes('response time') ||
+    lower.includes('p50') ||
+    lower.includes('p90') ||
+    lower.includes('p95') ||
+    lower.includes('p99') ||
+    lower.includes('slow')
+  ) {
+    type = 'latency';
+  } else if (
+    lower.includes('throughput') ||
+    lower.includes('requests per sec') ||
+    lower.includes('rps') ||
+    lower.includes('traffic')
   ) {
     type = 'throughput';
   } else if (
@@ -254,8 +279,37 @@ export function getHelpBlocks(): any[] {
         text:
           '*📊 Performance & Metrics*\n' +
           '`How is okrs performing in APAC?`\n' +
-          '`Show me error rate trends for logbook in US`\n' +
-          '`What is the latency for roadmaps in EU?`',
+          '`okrs performance in US`',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          '*🔴 Error Rates*\n' +
+          '`Show me error rates for okrs in APAC`\n' +
+          '`error rate trends for logbook in US`',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          '*⏱️ Latency*\n' +
+          '`What is the latency for roadmaps in EU?`\n' +
+          '`P95 response time for okrs in APAC`',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          '*🚀 Throughput*\n' +
+          '`What is the throughput of okrs in APAC?`\n' +
+          '`Show traffic for logbook in US`',
       },
     },
     {

@@ -2,6 +2,7 @@ import { getAIClient, AIClient } from './aiClient.js';
 import type { ParsedCommand } from './parser.js';
 import type { KnownBlock } from '@slack/web-api';
 import { header, divider, section, sectionWithFields, context } from './formatters/blocks.js';
+import { conversationManager } from './conversationManager.js';
 
 /**
  * Orchestrator — connects Slack to Falcon AI (Open WebUI) which calls MCP tools.
@@ -16,7 +17,49 @@ import { header, divider, section, sectionWithFields, context } from './formatte
  *                                  LLM formats response
  *                                       ↓
  *                                  Slack Block Kit message
+ *
+ * STREAMING: Results are posted to Slack SEQUENTIALLY as each query
+ * completes — never batched at the end. This keeps the connection alive
+ * and avoids ALB/gateway 504 timeouts.
+ *
+ * For "performance" (metricType=all), we break it into sub-queries:
+ *   error_rate → latency → throughput → endpoint_performance
+ * Each sub-query is a separate Falcon AI call, streamed individually.
  */
+
+export type SayFn = (msg: { blocks?: KnownBlock[]; text: string; thread_ts?: string }) => Promise<any>;
+
+/**
+ * Sub-metrics that make up a full "performance" report.
+ * Each becomes a SEPARATE Falcon AI call → SEPARATE MCP tool call.
+ * This avoids the MCP tool running all 11 Sumo queries in one call (timeout).
+ *
+ * Order matters: most critical insights first.
+ */
+const PERFORMANCE_SUB_METRICS = [
+  { metricType: 'error_rate',               emoji: '🔴', label: 'Error Rates' },
+  { metricType: 'latency',                 emoji: '⏱️', label: 'Latency' },
+  { metricType: 'throughput',              emoji: '🚀', label: 'Throughput' },
+  { metricType: 'endpoint_performance',    emoji: '🔗', label: 'Endpoint Performance' },
+  { metricType: 'success_failure_totals',  emoji: '📊', label: 'Success / Failure Totals' },
+  { metricType: 'unique_users',            emoji: '👥', label: 'Unique Users' },
+] as const;
+
+/** Type → config map */
+const TYPE_CONFIG: Record<string, { emoji: string; label: string }> = {
+  list_logs:                { emoji: '📋', label: 'Log Entries' },
+  performance:              { emoji: '📊', label: 'Performance Report' },
+  error_rate:               { emoji: '🔴', label: 'Error Rate Analysis' },
+  latency:                  { emoji: '⏱️', label: 'Latency Analysis' },
+  throughput:               { emoji: '🚀', label: 'Throughput Analysis' },
+  endpoint_performance:     { emoji: '🔗', label: 'Endpoint Performance' },
+  success_failure_totals:   { emoji: '📊', label: 'Success / Failure Totals' },
+  unique_users:             { emoji: '👥', label: 'Unique Users' },
+  detect_issues:            { emoji: '🔍', label: 'Issue Detection' },
+  summarize_logs:           { emoji: '📈', label: 'Log Summary' },
+  help:                     { emoji: '❓', label: 'Help' },
+  unknown:                  { emoji: '🤖', label: 'Analysis' },
+};
 
 export class Orchestrator {
   private aiClient: AIClient;
@@ -26,105 +69,219 @@ export class Orchestrator {
   }
 
   /**
-   * Main entry point — process a command end-to-end
+   * Main entry point — process a command end-to-end.
+   * ALL queries are streamed sequentially via `say()`.
    */
   async process(
     command: ParsedCommand,
     originalText: string,
+    say?: SayFn,
+    threadTs?: string,
   ): Promise<{ blocks: KnownBlock[]; text: string }> {
     try {
-      // If region is "all" or unspecified, query each region separately and combine
-      // This avoids 504 gateway timeouts (all-region queries take 60+ seconds)
-      if (!command.region || command.region === 'all') {
-        return await this.processAllRegions(command, originalText);
+      // ── Conversation context ──
+      const conversation = conversationManager.getConversation(threadTs);
+      const threadContext = conversationManager.getContext(threadTs);
+
+      // Inherit namespace/region from thread if not specified
+      if (!command.namespace && threadContext.namespace) {
+        command.namespace = threadContext.namespace;
+        console.log(`[Orchestrator] Inherited namespace from thread: ${threadContext.namespace}`);
+      }
+      if ((!command.region || command.region === 'all') && threadContext.region) {
+        command.region = threadContext.region;
+        console.log(`[Orchestrator] Inherited region from thread: ${threadContext.region}`);
       }
 
-      // Single region query — fits within 60s gateway timeout
-      const enrichedPrompt = this.enrichQuery(command, originalText);
-      console.log(`[Orchestrator] Sending to Falcon AI for ${command.region}...`);
-      const response = await this.aiClient.query(enrichedPrompt);
-      return this.formatForSlack(command, response.text);
+      // Store context for future follow-ups
+      if (threadTs) {
+        conversationManager.setContext(threadTs, command.namespace, command.region);
+        conversationManager.addUserMessage(threadTs, originalText);
+      }
+
+      const regions = this.getRegions(command);
+      const target = command.deployment || command.namespace || 'unknown';
+      const cfg = TYPE_CONFIG[command.type] || TYPE_CONFIG.unknown;
+
+      // ── Post header ──
+      if (say) {
+        const regionLabel = regions.length === 1
+          ? this.regionFlag(regions[0])
+          : '🌍 All Regions';
+        await say({
+          blocks: [
+            header(`${cfg.emoji} ${cfg.label} — ${target}`),
+            context([
+              `${regionLabel}  •  Last \`${command.timeRange}\`  •  ${new Date().toLocaleString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} UTC`,
+            ]),
+            divider(),
+          ],
+          text: `${cfg.label} for ${target}`,
+          thread_ts: threadTs,
+        });
+      }
+
+      // ── Determine sub-queries ──
+      // "performance" = run error_rate, latency, throughput, endpoint_performance separately
+      // everything else = single query per region
+      const subQueries = command.type === 'performance'
+        ? PERFORMANCE_SUB_METRICS.map(m => ({
+            metricType: m.metricType,
+            emoji: m.emoji,
+            label: m.label,
+          }))
+        : [{ metricType: command.type, emoji: cfg.emoji, label: cfg.label }];
+
+      let allText = '';
+      let successCount = 0;
+      let errorCount = 0;
+
+      // ── For each region → for each sub-query → run & stream ──
+      for (const region of regions) {
+        const flag = this.regionFlag(region);
+
+        // Show region header if multiple regions
+        if (regions.length > 1 && say) {
+          await say({
+            blocks: [divider(), header(flag)],
+            text: flag,
+            thread_ts: threadTs,
+          });
+        }
+
+        for (const sub of subQueries) {
+          // Build a focused command for this specific sub-query + region
+          const subCommand: ParsedCommand = {
+            ...command,
+            region,
+            type: sub.metricType as ParsedCommand['type'],
+          };
+          const enrichedPrompt = this.enrichQuery(subCommand, originalText);
+
+          console.log(`[Orchestrator] ${flag} → ${sub.label}...`);
+
+          if (say && subQueries.length > 1) {
+            // Show progress indicator for each sub-query
+            await say({
+              blocks: [
+                context([`${sub.emoji} _Fetching ${sub.label.toLowerCase()}..._`]),
+              ],
+              text: `Fetching ${sub.label}...`,
+              thread_ts: threadTs,
+            });
+          }
+
+          try {
+            const response = await this.aiClient.query(enrichedPrompt, {
+              chatId: conversation.chatId,
+              history: conversation.history,
+              isFollowUp: conversation.isFollowUp,
+            });
+
+            if (response.text) {
+              successCount++;
+              allText += `\n\n## ${flag} — ${sub.label}\n\n${response.text}`;
+
+              // Store assistant response in thread history
+              if (threadTs) {
+                conversationManager.addAssistantMessage(threadTs, response.text);
+              }
+
+              // ── Stream this result to Slack immediately ──
+              if (say) {
+                const resultBlocks = this.parseMarkdownToBlocks(response.text);
+
+                // Add sub-query label if performance breakdown
+                const blocks: KnownBlock[] = [];
+                if (subQueries.length > 1) {
+                  blocks.push(section(`*${sub.emoji} ${sub.label}*`));
+                }
+                blocks.push(...resultBlocks);
+
+                await say({
+                  blocks: blocks.slice(0, 49),
+                  text: `${sub.label}: ${response.text.substring(0, 200)}`,
+                  thread_ts: threadTs,
+                });
+              }
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`[Orchestrator] ${flag} ${sub.label} failed: ${msg}`);
+            errorCount++;
+
+            if (say) {
+              const isTimeout = msg.includes('504') || msg.includes('timeout');
+              await say({
+                blocks: [
+                  section(`${sub.emoji} ${sub.label}  ⚠️ ${isTimeout ? 'Timed out' : 'Failed'}: _${msg.substring(0, 200)}_`),
+                ],
+                text: `${sub.label}: Error`,
+                thread_ts: threadTs,
+              });
+            }
+          }
+        }
+      }
+
+      // ── Post footer ──
+      const summaryParts: string[] = [];
+      if (successCount > 0) summaryParts.push(`✅ ${successCount} query(s) succeeded`);
+      if (errorCount > 0) summaryParts.push(`⚠️ ${errorCount} query(s) failed`);
+
+      if (say) {
+        await say({
+          blocks: [
+            divider(),
+            context([
+              `${summaryParts.join('  •  ')}  •  *Opvi* — powered by Falcon AI + MCP Tools`,
+            ]),
+          ],
+          text: summaryParts.join(' | '),
+          thread_ts: threadTs,
+        });
+      }
+
+      // Return combined text (fallback for non-streaming)
+      if (!allText) allText = 'No data returned.';
+      return {
+        blocks: [section(allText.substring(0, 3000))],
+        text: allText.substring(0, 300),
+      };
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[Orchestrator] Error:', message);
 
-      const isTimeout = message.includes('504') || message.includes('timeout') || message.includes('ETIMEDOUT');
+      const errorBlocks: KnownBlock[] = [
+        header('❌ Request Failed'),
+        divider(),
+        section(
+          message.includes('504') || message.includes('timeout')
+            ? `⏱️ *Gateway Timeout*\n\n*Try:*\n  •  Specify a single region: _"okrs error rate in APAC"_\n  •  Use a shorter time range: _"last 1 hour"_\n  •  Request specific metrics: _"latency for okrs in US"_`
+            : `Something went wrong:\n\`\`\`${message.substring(0, 500)}\`\`\``,
+        ),
+        divider(),
+        context(['💡 Tip: asking for specific metrics (error rate, latency, throughput) is faster than full performance']),
+      ];
 
-      return {
-        blocks: [
-          header('❌ Request Failed'),
-          divider(),
-          section(
-            isTimeout
-              ? `⏱️ *Gateway Timeout*\nThe query took too long to complete. This usually happens with complex all-region queries.\n\n*Try:*\n  •  Specify a single region: _"okrs performance in APAC"_\n  •  Use a shorter time range: _"last 1 hour"_\n  •  Request specific metrics: _"error rate for okrs in US"_`
-              : `Something went wrong:\n\`\`\`${message.substring(0, 500)}\`\`\``,
-          ),
-          divider(),
-          context(['💡 If the issue persists, check Docker logs or try again']),
-        ],
-        text: `Error: ${message}`,
-      };
+      if (say) {
+        await say({
+          blocks: errorBlocks,
+          text: `Error: ${message}`,
+          thread_ts: threadTs,
+        });
+      }
+
+      return { blocks: errorBlocks, text: `Error: ${message}` };
     }
   }
 
-  /**
-   * Query each production region individually and combine results.
-   * This avoids the 60s gateway timeout that all-region queries hit.
-   */
-  private async processAllRegions(
-    command: ParsedCommand,
-    originalText: string,
-  ): Promise<{ blocks: KnownBlock[]; text: string }> {
-    const regions = ['usw2-prod', 'euc1-prod', 'aps2-prod'];
-    const regionLabels: Record<string, string> = {
-      'usw2-prod': 'US',
-      'euc1-prod': 'EU',
-      'aps2-prod': 'AP',
-    };
-
-    const results: string[] = [];
-    const errors: string[] = [];
-
-    // Query regions in parallel (each should finish within 60s)
-    const promises = regions.map(async (region) => {
-      const regionCommand = { ...command, region };
-      const enrichedPrompt = this.enrichQuery(regionCommand, originalText);
-      console.log(`[Orchestrator] Querying ${region}...`);
-
-      try {
-        const response = await this.aiClient.query(enrichedPrompt);
-        return { region, text: response.text, error: null };
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[Orchestrator] ${region} failed: ${msg}`);
-        return { region, text: '', error: msg };
-      }
-    });
-
-    const regionResults = await Promise.all(promises);
-
-    for (const r of regionResults) {
-      const label = regionLabels[r.region] || r.region;
-      if (r.error) {
-        errors.push(`${label}: ⚠️ ${r.error}`);
-      } else if (r.text) {
-        results.push(`## ${label} (${r.region})\n\n${r.text}`);
-      }
+  /** Get the list of regions to query */
+  private getRegions(command: ParsedCommand): string[] {
+    if (command.region && command.region !== 'all') {
+      return [command.region];
     }
-
-    // Combine all region results
-    let combinedText = results.join('\n\n---\n\n');
-    if (errors.length > 0) {
-      combinedText += `\n\n**Errors:**\n${errors.join('\n')}`;
-    }
-
-    if (!combinedText) {
-      combinedText = 'No data returned from any region.';
-    }
-
-    // Override region label for formatting
-    const allCommand = { ...command, region: 'all' as string };
-    return this.formatForSlack(allCommand, combinedText);
+    return ['usw2-prod', 'euc1-prod', 'aps2-prod'];
   }
 
   /**
@@ -150,13 +307,20 @@ export class Orchestrator {
       hints.push(`Time range: ${command.timeRange}`);
     }
 
-    // Map command type to specific MCP tool hint
+    // Map command type to specific MCP tool hint.
+    // IMPORTANT: Never use metricType "all" — it runs 11 Sumo queries in one call and times out.
+    // The orchestrator breaks "performance" into individual sub-queries, each with its own metricType.
     const toolHints: Record<string, string> = {
-      performance: 'Use the get_performance_metrics tool with metricType "all"',
+      error_rate: 'Use the get_performance_metrics tool with metricType "error_rate" ONLY. Do NOT run endpoint_performance, throughput, latency, or any other metric.',
+      latency: 'Use the get_performance_metrics tool with metricType "latency" ONLY. Do NOT run endpoint_performance, throughput, error_rate, or any other metric.',
+      throughput: 'Use the get_performance_metrics tool with metricType "throughput" ONLY. Do NOT run endpoint_performance, latency, error_rate, or any other metric.',
+      endpoint_performance: 'Use the get_performance_metrics tool with metricType "endpoint_performance" ONLY. Do NOT run error_rate, latency, throughput, or any other metric.',
+      success_failure_totals: 'Use the get_performance_metrics tool with metricType "success_failure_totals" ONLY. Do NOT run any other metric.',
+      unique_users: 'Use the get_performance_metrics tool with metricType "unique_users" ONLY. Do NOT run any other metric.',
+      user_activity: 'Use the get_performance_metrics tool with metricType "user_activity" ONLY. Do NOT run any other metric.',
       list_logs: 'Use the list_logs tool to fetch actual log entries',
       summarize_logs: 'Use the summarize_logs tool for log distribution and top errors',
       detect_issues: 'Use the detect_issues tool to find anomalies and error spikes',
-      throughput: 'Use the get_performance_metrics tool with metricType "throughput"',
     };
 
     if (toolHints[command.type]) {
@@ -168,61 +332,6 @@ export class Orchestrator {
     }
 
     return parts.join('');
-  }
-
-  /**
-   * Convert AI text response into beautiful Slack Block Kit blocks
-   */
-  private formatForSlack(
-    command: ParsedCommand,
-    aiText: string,
-  ): { blocks: KnownBlock[]; text: string } {
-    const blocks: KnownBlock[] = [];
-    const target = command.deployment || command.namespace || 'unknown';
-    const regionLabel =
-      !command.region || command.region === 'all' ? '🌍 All Regions' : this.regionFlag(command.region);
-
-    // Type-specific header with emoji and title
-    const typeConfig: Record<string, { emoji: string; label: string }> = {
-      list_logs:      { emoji: '📋', label: 'Log Entries' },
-      performance:    { emoji: '📊', label: 'Performance Report' },
-      throughput:     { emoji: '🚀', label: 'Throughput Analysis' },
-      detect_issues:  { emoji: '🔍', label: 'Issue Detection' },
-      summarize_logs: { emoji: '📈', label: 'Log Summary' },
-      help:           { emoji: '❓', label: 'Help' },
-      unknown:        { emoji: '🤖', label: 'Analysis' },
-    };
-
-    const cfg = typeConfig[command.type] || typeConfig.unknown;
-
-    // ── Top header bar ──
-    blocks.push(header(`${cfg.emoji} ${cfg.label} — ${target}`));
-    blocks.push(
-      context([
-        `${regionLabel}  •  Last \`${command.timeRange}\`  •  ${new Date().toLocaleString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} UTC`,
-      ]),
-    );
-    blocks.push(divider());
-
-    // ── Parse the AI markdown response into Slack blocks ──
-    const contentBlocks = this.parseMarkdownToBlocks(aiText);
-    blocks.push(...contentBlocks);
-
-    // ── Footer ──
-    blocks.push(divider());
-    blocks.push(
-      context([
-        ` *Opvi* — powered by Falcon AI + MCP Tools `,
-      ]),
-    );
-
-    // Slack has a 50-block limit per message
-    const trimmedBlocks = blocks.slice(0, 49);
-
-    return {
-      blocks: trimmedBlocks,
-      text: aiText.substring(0, 300) + (aiText.length > 300 ? '...' : ''),
-    };
   }
 
   /** Region string → flag label */
@@ -239,7 +348,7 @@ export class Orchestrator {
    * Parse markdown text from AI into beautiful Slack blocks.
    * Handles headers, tables, bullet lists, bold/italic, code blocks, numbered lists.
    */
-  private parseMarkdownToBlocks(markdown: string): KnownBlock[] {
+  public parseMarkdownToBlocks(markdown: string): KnownBlock[] {
     const blocks: KnownBlock[] = [];
     const lines = markdown.split('\n');
     let currentText = '';
