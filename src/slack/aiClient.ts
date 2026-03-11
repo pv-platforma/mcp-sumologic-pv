@@ -201,12 +201,10 @@ export class AIClient {
     // Discover MCP tools first
     const toolIds = await this.discoverMcpTools();
 
-    // Fresh chat_id per query unless a thread chat_id is provided
-    const chatId = options?.chatId || `opvi-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
     const history = options?.history || [];
     const isFollowUp = options?.isFollowUp || false;
 
-    console.log(`[AIClient] Sending to Open WebUI (chat_id: ${chatId}, follow_up: ${isFollowUp}, history: ${history.length} msgs, tools: ${toolIds.length})`);
+    console.log(`[AIClient] Sending to Open WebUI (follow_up: ${isFollowUp}, history: ${history.length} msgs, tools: ${toolIds.length})`);
     console.log(`[AIClient] Prompt: "${userMessage.substring(0, 100)}..."`);
     const startTime = Date.now();
 
@@ -225,22 +223,28 @@ export class AIClient {
 
     messages.push({ role: 'user', content: userMessage });
 
+    // Build payload — only include chat_id for follow-ups where we need conversation continuity
+    // Open WebUI rejects invalid chat_id formats, so we omit it for fresh queries
+    const payload: Record<string, unknown> = {
+      model: this.config.model,
+      messages,
+      max_tokens: this.config.maxTokens || 4096,
+      temperature: 0.1,
+      stream: false,
+    };
+
+    // Only pass tool_ids if we have tools
+    if (toolIds.length > 0) {
+      payload.tool_ids = toolIds;
+    }
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.config.apiKey}`,
       },
-      body: JSON.stringify({
-        model: this.config.model,
-        messages,
-        chat_id: chatId,
-        // Pass tool_ids so Open WebUI activates MCP tools server-side
-        ...(toolIds.length > 0 && { tool_ids: toolIds }),
-        max_tokens: this.config.maxTokens || 4096,
-        temperature: 0.1,
-        stream: false,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
