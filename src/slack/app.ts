@@ -60,7 +60,6 @@ IMPORTANT: Use MCP tools to fetch fresh data if needed. Reference conversation h
 
       const aiClient = getAIClient();
       const response = await aiClient.query(followUpPrompt, {
-        chatId: conversation.chatId,
         history: conversation.history,
         isFollowUp: true,
       });
@@ -145,13 +144,16 @@ IMPORTANT: Use MCP tools to fetch fresh data if needed. Reference conversation h
   const regionLabel =
     command.region === 'all' || !command.region ? '🌍 all regions' : command.region;
   const typeLabels: Record<string, string> = {
-    performance: '📊 performance metrics',
-    error_rate: '🔴 error rates',
-    latency: '⏱️ latency metrics',
+    performance: '📊 performance report',
+    throughput: '🚀 traffic & throughput',
+    unique_users: '👥 active users',
+    success_failure_totals: '✅ success & failure rates',
+    endpoint_performance: '� endpoint performance',
+    latency: '⏱️ response times',
+    error_rate: '🔴 error analysis',
     list_logs: '📋 log entries',
     summarize_logs: '📈 log summary',
     detect_issues: '🔍 issue detection',
-    throughput: '🚀 throughput analysis',
   };
   const actionLabel = typeLabels[command.type] || command.type.replace('_', ' ');
 
