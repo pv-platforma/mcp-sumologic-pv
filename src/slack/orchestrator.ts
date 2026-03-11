@@ -34,26 +34,31 @@ export type SayFn = (msg: { blocks?: KnownBlock[]; text: string; thread_ts?: str
  * Each becomes a SEPARATE Falcon AI call → SEPARATE MCP tool call.
  * This avoids the MCP tool running all 11 Sumo queries in one call (timeout).
  *
- * Order matters: most critical insights first.
+ * ORDER: Good news first, concerns last (like a news report).
+ *  1. Traffic & adoption (throughput, users) — "your app is being used!"
+ *  2. Success rates — "and it's mostly working!"
+ *  3. Endpoint breakdown — "here's how each endpoint does"
+ *  4. Latency — "some things could be faster"
+ *  5. Errors — "here's what needs attention"
  */
 const PERFORMANCE_SUB_METRICS = [
-  { metricType: 'error_rate',               emoji: '🔴', label: 'Error Rates' },
-  { metricType: 'latency',                 emoji: '⏱️', label: 'Latency' },
-  { metricType: 'throughput',              emoji: '🚀', label: 'Throughput' },
-  { metricType: 'endpoint_performance',    emoji: '🔗', label: 'Endpoint Performance' },
-  { metricType: 'success_failure_totals',  emoji: '📊', label: 'Success / Failure Totals' },
+  { metricType: 'throughput',              emoji: '�', label: 'Traffic & Throughput' },
   { metricType: 'unique_users',            emoji: '👥', label: 'Unique Users' },
+  { metricType: 'success_failure_totals',  emoji: '✅', label: 'Success & Failure Rates' },
+  { metricType: 'endpoint_performance',    emoji: '🔗', label: 'Endpoint Performance' },
+  { metricType: 'latency',                 emoji: '⏱️', label: 'Response Times' },
+  { metricType: 'error_rate',              emoji: '�', label: 'Error Analysis' },
 ] as const;
 
 /** Type → config map */
 const TYPE_CONFIG: Record<string, { emoji: string; label: string }> = {
   list_logs:                { emoji: '📋', label: 'Log Entries' },
   performance:              { emoji: '📊', label: 'Performance Report' },
-  error_rate:               { emoji: '🔴', label: 'Error Rate Analysis' },
-  latency:                  { emoji: '⏱️', label: 'Latency Analysis' },
-  throughput:               { emoji: '🚀', label: 'Throughput Analysis' },
+  error_rate:               { emoji: '🔴', label: 'Error Analysis' },
+  latency:                  { emoji: '⏱️', label: 'Response Times' },
+  throughput:               { emoji: '🚀', label: 'Traffic & Throughput' },
   endpoint_performance:     { emoji: '🔗', label: 'Endpoint Performance' },
-  success_failure_totals:   { emoji: '📊', label: 'Success / Failure Totals' },
+  success_failure_totals:   { emoji: '✅', label: 'Success & Failure Rates' },
   unique_users:             { emoji: '👥', label: 'Unique Users' },
   detect_issues:            { emoji: '🔍', label: 'Issue Detection' },
   summarize_logs:           { emoji: '📈', label: 'Log Summary' },
@@ -161,21 +166,13 @@ export class Orchestrator {
 
           console.log(`[Orchestrator] ${flag} → ${sub.label}...`);
 
-          if (say && subQueries.length > 1) {
-            // Show progress indicator for each sub-query
-            await say({
-              blocks: [
-                context([`${sub.emoji} _Fetching ${sub.label.toLowerCase()}..._`]),
-              ],
-              text: `Fetching ${sub.label}...`,
-              thread_ts: threadTs,
-            });
-          }
-
           try {
+            // Only pass conversation history for single queries (follow-ups).
+            // Sub-queries should be stateless — passing history causes the LLM
+            // to hallucinate by mixing old data with the new sub-query prompt.
             const response = await this.aiClient.query(enrichedPrompt, {
-              history: conversation.history,
-              isFollowUp: conversation.isFollowUp,
+              history: isSubQuery ? [] : conversation.history,
+              isFollowUp: isSubQuery ? false : conversation.isFollowUp,
             });
 
             if (response.text) {
@@ -219,18 +216,70 @@ export class Orchestrator {
         }
       }
 
+      // ── Generate summary for performance queries (multiple sub-queries) ──
+      if (say && subQueries.length > 1 && allText && successCount > 0) {
+        try {
+          const summaryPrompt = `You just collected these performance metrics for ${target}. Write a concise executive summary.
+
+DATA:
+${allText.substring(0, 6000)}
+
+FORMAT (follow this EXACT structure):
+
+## Overall Health
+One line verdict: 🟢 Healthy / 🟡 Degraded / 🔴 Critical — with a one-sentence reason referencing actual numbers.
+
+## What's Working Well
+2-3 bullet points about positive findings (throughput, success rates, active users). Reference real numbers.
+
+## Areas of Concern
+2-3 bullet points about any issues found (high error rates, slow endpoints, latency spikes). If everything looks good, say so.
+
+## Action Items
+1-3 numbered recommendations. Be specific — name the endpoint, the error, the deployment.
+
+RULES:
+- Be concise — this is a summary, not a repeat of the data
+- Reference actual numbers from the data (e.g., "99.2% success rate", "P95: 1,200ms")
+- Do NOT repeat raw data tables
+- Do NOT include introductory text like "Here is the summary"
+- Use Slack-friendly formatting: *bold*, \`code\`, bullet points`;
+
+          const summaryResponse = await this.aiClient.query(summaryPrompt, {
+            history: [],
+            isFollowUp: false,
+          });
+
+          if (summaryResponse.text) {
+            const summaryBlocks = this.parseMarkdownToBlocks(summaryResponse.text);
+            await say({
+              blocks: [
+                divider(),
+                section('*📋 Summary*'),
+                ...summaryBlocks.slice(0, 45),
+              ],
+              text: `Summary: ${summaryResponse.text.substring(0, 200)}`,
+              thread_ts: threadTs,
+            });
+          }
+        } catch (err) {
+          console.error('[Orchestrator] Summary generation failed:', err);
+        }
+      }
+
       // ── Post footer ──
       const summaryParts: string[] = [];
+      if (successCount > 0) summaryParts.push(`✅ ${successCount} succeeded`);
+      if (errorCount > 0) summaryParts.push(`⚠️ ${errorCount} failed`);
 
       if (say) {
+        const footerText = `${summaryParts.join('  •  ')}  •  *Opvi* — powered by Falcon AI + MCP Tools`;
         await say({
           blocks: [
             divider(),
-            context([
-              `${summaryParts.join('  •  ')}  •  *Opvi* — powered by Falcon AI + MCP Tools`,
-            ]),
+            context([footerText]),
           ],
-          text: summaryParts.join(' | '),
+          text: footerText,
           thread_ts: threadTs,
         });
       }
@@ -299,13 +348,25 @@ export class Orchestrator {
     const hints: string[] = [];
 
     // For sub-queries: replace the original prompt with a focused one
+    // Each metric type gets a tailored format instruction
     if (isSubQuery) {
       const target = command.deployment || command.namespace || 'unknown';
-      parts.push(`Show ${command.type.replace('_', ' ')} for ${target} in ${command.region}.`);
+      parts.push(`Show ${command.type.replace(/_/g, ' ')} for ${target} in ${command.region}.`);
+
+      // Tailored output hints per metric type
+      const formatHints: Record<string, string> = {
+        throughput: 'Show requests/sec as a table with timeslice buckets. Highlight peak throughput and average. Keep it to data only.',
+        unique_users: 'Show the total unique user count and a list of the top 5-10 most active users with their request counts, as a table.',
+        success_failure_totals: 'Show total successes vs failures and success rate % in a compact table. Highlight if failure rate is above 1%.',
+        endpoint_performance: 'Show a table of endpoints sorted by request count. Include response time P50/P95 and error count per endpoint. Flag any with high error rates using ⚠️.',
+        latency: 'Show P50, P90, P95, P99 latency in a table. Highlight any P95 > 2000ms with ⚠️. Show trend (improving/degrading) if timeseries data available.',
+        error_rate: 'Show error rates (4xx and 5xx) as a table over time. Highlight any spikes. List top 3 error types with counts.',
+      };
+
+      const formatHint = formatHints[command.type] || 'Show ONLY the data in a compact table or bullet points.';
       hints.push(
-        'OUTPUT FORMAT: Be concise. Show ONLY the data in a table or bullet points. ' +
-        'Do NOT include Overall Health, Recommendations, Summary, or Details sections. ' +
-        'Do NOT include introductory text. Just the metric data.'
+        `OUTPUT FORMAT: Be concise. ${formatHint} ` +
+        'Do NOT include Overall Health, Recommendations, Summary, or introductory text. Just the data.'
       );
     } else {
       parts.push(originalText);
